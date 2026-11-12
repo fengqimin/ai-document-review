@@ -18,12 +18,19 @@ class ReviewClient:
     """In-process review engine client (replaces AMLClient)."""
 
     def _sync_stream(self, pdf_path: str) -> Generator[str, None, None]:
+        import sys
+        from pathlib import Path
+
+        # The API runs with cwd=app/api; the flow package and `common` live at
+        # the repository root, which must be importable.
+        repo_root = str(Path(__file__).resolve().parents[3])
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
         try:
             from flows.ai_doc_review.engine import stream_review
         except ImportError as e:
             raise RuntimeError(
-                "Review pipeline is not available yet (implemented in Phase B). "
-                f"Details: {e}"
+                f"Review pipeline is not importable (missing dependencies or path): {e}"
             ) from e
         yield from stream_review(pdf_path)
 

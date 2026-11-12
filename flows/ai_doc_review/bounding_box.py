@@ -1,16 +1,21 @@
-from azure.ai.formrecognizer import AnalyzeResult, DocumentWord
-from shapely import Polygon, union_all
-from fitz import Rect
-from common.models import CombinedIssue
+"""Bounding-box logic, algorithm unchanged from the Document Intelligence
+version — only the azure.ai.formrecognizer types are swapped for the local
+DI-compatible dataclasses (flows.ai_doc_review.document)."""
+
 import logging
 
+from common.models import CombinedIssue
+from flows.ai_doc_review.document import ExtractedDocument, Word
+from shapely import Polygon, union_all
+from fitz import Rect
 
-def create_bounding_box(issue_words: list[DocumentWord], page_height: int) -> list[int]:
+
+def create_bounding_box(issue_words: list[Word], page_height: float) -> list[float]:
     """
     Creates bounding box for the issue words.
 
     Args:
-        issue_words: The list of Document Intelligence word objects for the issue text spans.
+        issue_words: The list of word objects for the issue text spans.
 
     Returns:
         The list of bounding box quadpoint coords (minx, miny, maxx, maxy) for the issue words (in pixels),
@@ -23,7 +28,7 @@ def create_bounding_box(issue_words: list[DocumentWord], page_height: int) -> li
 
     for i, word in enumerate(issue_words):
         # Create a shapely polygon from each word's polygon points
-        issue_box = Polygon(word.polygon)
+        issue_box = Polygon([(p.x, p.y) for p in word.polygon])
         issue_boxes.append(issue_box)
 
         # Merge word boxes into greater bounding box (if next word has a lower x value, it's on a new line so start a new merged box)
@@ -47,12 +52,12 @@ def create_bounding_box(issue_words: list[DocumentWord], page_height: int) -> li
     return rounded_quadpoints
 
 
-def add_bounding_box(di_result: AnalyzeResult, issue: CombinedIssue) -> CombinedIssue:
+def add_bounding_box(di_result: ExtractedDocument, issue: CombinedIssue) -> CombinedIssue:
     """
     Adds bounding box to issue.
 
     Args:
-        pdf_document: The PDF document file stream.
+        di_result: The DI-compatible extracted document.
         issue: The issue object.
 
     Returns:
@@ -65,27 +70,25 @@ def add_bounding_box(di_result: AnalyzeResult, issue: CombinedIssue) -> Combined
     # Add page num to the issue object
     issue.location.page_num = page_num
 
-    # Get the index (offset) of the issue text within the paragraph so we can find the issue text in the analyze result
+    # Get the index (offset) of the issue text within the paragraph so we can find the issue text in the extracted document
     try:
         text_index = issue.location.source_sentence.index(issue.text)
     except ValueError:
-        logging.error(f"Unable to add bounding box to issue: '{issue.text}' not found in source sentence: '{issue.location.source_sentence}'.", str(issue))
+        logging.error(f"Unable to add bounding box to issue: '{issue.text}' not found in source sentence: '{issue.location.source_sentence}'.")
         return issue
 
     # Get the index within the document word list of the first word in the source paragraph (using its span offset value)
-    # https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/concept/analyze-document-response?view=doc-intel-4.0.0#spans
     try:
         para_first_word_index = next(i for i, word in enumerate(page_words) if word.span.offset == para_offset)
     except Exception as e:
-        logging.error(f"Unable to add bounding box to issue '{issue.text}'. Could not find index of first word in source sentence; no matching word with paragraph offset ({para_offset}) in DI words list", str(issue))
+        logging.error(f"Unable to add bounding box to issue '{issue.text}'. Could not find index of first word in source sentence; no matching word with paragraph offset ({para_offset}) in words list")
         return issue
 
     # Then calculate how many words into the paragraph the issue text starts
     num_of_words_to_issue_text = len(issue.location.source_sentence[0:text_index].split())
     first_issue_word_index = para_first_word_index + num_of_words_to_issue_text
 
-    # Get the issue word objects from the Document Intelligence page result
-    # https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/concept/analyze-document-response?view=doc-intel-4.0.0#word
+    # Get the issue word objects from the page result
     page_words = di_result.pages[page_num - 1].words
     issue_text_word_count = len(issue.text.split())
     issue_words = page_words[first_issue_word_index:first_issue_word_index+issue_text_word_count]
