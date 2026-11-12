@@ -1,0 +1,40 @@
+# Keep secrets, caches and build artifacts out of the build context.
+
+# --- secrets: NEVER bake these into an image ---
+.env
+**/.env
+flows/.env
+
+# --- version control / CI / docs ---
+.git
+.github
+.vscode
+.devcontainer
+.task
+docs
+eval
+infra
+src
+*.md
+!app/api/README.md
+
+# --- local runtime state ---
+data
+app/api/data
+.venv
+venv
+
+# --- node ---
+app/ui/node_modules
+node_modules
+
+# --- build outputs (rebuilt inside the image) ---
+app/api/www
+
+# --- python caches ---
+**/__pycache__
+**/*.pyc
+.pytest_cache
+
+# --- workbuddy workspace data ---
+.workbuddy

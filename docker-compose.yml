@@ -1,0 +1,16 @@
+# Local one-container deployment. The only external dependency is an
+# OpenAI-compatible LLM endpoint, configured via .env (see .env.example).
+
+services:
+  app:
+    build: .
+    image: ai-doc-review:local
+    container_name: ai-doc-review
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # All state: review.db (SQLite), documents/ (PDFs), logs/
+      - ./data:/app/data
+    restart: unless-stopped
