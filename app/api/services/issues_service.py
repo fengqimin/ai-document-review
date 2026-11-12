@@ -2,17 +2,17 @@ from common.logger import get_logger
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator, List
-from services.aml_client import AMLClient
+from services.review_client import ReviewClient
 from database.issues_repository import IssuesRepository
-from fastapi_azure_auth.user import User
+from security.auth import User
 from config.config import settings
 from common.models import FlowOutputChunk, Issue, IssueStatusEnum, ModifiedFieldsModel, DismissalFeedbackModel
 
 logging = get_logger(__name__)
 
 class IssuesService:
-    def __init__(self, issues_repository: IssuesRepository, aml_client: AMLClient) -> None:
-        self.aml_client = aml_client
+    def __init__(self, issues_repository: IssuesRepository, review_client: ReviewClient) -> None:
+        self.review_client = review_client
         self.issues_repository = issues_repository
 
 
@@ -52,7 +52,7 @@ class IssuesService:
             logging.info(f"Initiating review for document {pdf_name}")
 
             # Initiate review to get a stream of issues
-            stream_data = self.aml_client.call_aml_endpoint(settings.aml_endpoint_name, pdf_name)
+            stream_data = self.review_client.stream_chunks(pdf_name)
             async for chunk in stream_data:
                 flow_output = FlowOutputChunk.model_validate_json(chunk)
                 issues = [

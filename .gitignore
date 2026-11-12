@@ -175,3 +175,6 @@ certs/
 
 # Azure Pipelines
 !.ado/**
+
+# Local deployment runtime data (SQLite, PDFs, logs)
+data/

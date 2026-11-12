@@ -1,78 +1,105 @@
-from common.logger import get_logger
-from azure.cosmos.exceptions import CosmosHttpResponseError
-from database.config import CosmosDBConfig
+import json
 from typing import Any, Dict, List, Optional
 
+from common.logger import get_logger
+from database.config import ALLOWED_TABLES, SQLiteDBConfig
 
 logging = get_logger(__name__)
 
-class CosmosDBClient:
+
+class SQLiteDBClient:
+    """SQLite-backed document store with the same method surface as the old
+    CosmosDBClient, so callers (issues_repository) keep working unchanged.
+
+    Items are stored as a JSON ``payload`` column keyed by (id, doc_id).
+    All methods are synchronous; callers wrap them with asyncio.to_thread.
+    """
+
+    # Filter columns allowed in retrieve/delete queries (whitelist, prevents
+    # SQL injection via dynamic column names).
+    _FILTER_COLUMNS = {"doc_id"}
+
     def __init__(self, container_name: str) -> None:
-        """Initialize the CosmosDBClient, setting up the database and container."""
-        config = CosmosDBConfig(container_name)
-        self.client = config.get_client()
-        self.database = self.client.get_database_client(config.get_database_name())
-        self.container = self.database.get_container_client(container_name)
+        if container_name not in ALLOWED_TABLES:
+            raise ValueError(f"Unknown container/table: {container_name}")
+        self.table = container_name
+        self.config = SQLiteDBConfig()
 
-
-    async def store_item(self, item: Dict[str, any]) -> None:
-        """
-        Store an item in the Cosmos DB container.
-
-        :param item: A dictionary representing the item to store. Must contain an 'id' field.
-        """
+    # ------------------------------------------------------------------ write
+    def store_item(self, item: Dict[str, Any]) -> None:
+        """Upsert an item. Must contain 'id'; 'doc_id' is the partition key."""
+        item_id = item.get("id")
+        doc_id = item.get("doc_id")
+        if item_id is None or doc_id is None:
+            raise ValueError("Item must contain 'id' and 'doc_id' fields.")
+        conn = self.config.connect()
         try:
-            self.container.upsert_item(body=item)
-            logging.info("Item stored successfully.")
-        except CosmosHttpResponseError as e:
-            logging.error(f"An error occurred while storing the item: {e}")
-            raise e
-
-
-    async def retrieve_item_by_id(self, item_id: str, partition_key: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve an item from the Cosmos DB container by its ID.
-
-        :param item_id: The ID of the item to retrieve.
-        :return: The item if found, or None if not found or an error occurs.
-        """
-        try:
-            item = self.container.read_item(item=item_id, partition_key=partition_key)
-            return item
-        except CosmosHttpResponseError as e:
-            if e.status_code == 404:
-                logging.warning(f"Item with ID {item_id} not found.")
-                return None
-            else:
-                logging.error(f"An error occurred while retrieving the item: {e}")
-                return None
-
-
-    async def retrieve_items_by_values(self, filters: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-        """
-        Retrieve items from the Cosmos DB container where specified columns match the given values.
-        
-        :param filters: A dictionary where keys are column names and values are the values to match.
-        :return: A list of items matching the criteria, or None if an error occurs.
-        """
-        try:
-            # Construct the query dynamically based on the filters provided
-            filter_clauses = [f"c.{column}=@{column}" for column in filters.keys()]
-            query = f"SELECT * FROM c WHERE " + " AND ".join(filter_clauses)
-            parameters = [{"name": f"@{column}", "value": value} for column, value in filters.items()]
-            
-            # Execute the query
-            items = self.container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
+            conn.execute(
+                f"INSERT INTO {self.table} (id, doc_id, payload) VALUES (?, ?, ?) "
+                f"ON CONFLICT (id, doc_id) DO UPDATE SET payload = excluded.payload",
+                (item_id, doc_id, json.dumps(item, ensure_ascii=False)),
             )
-            
-            # Convert the iterator to a list
-            items_list = list(items)
-            
-            return items_list
-        
-        except CosmosHttpResponseError as e:
-            logging.error(f"An error occurred while retrieving items: {e}")
+            conn.commit()
+            logging.debug(f"Item {item_id} stored in {self.table}.")
+        except Exception as e:
+            logging.error(f"An error occurred while storing the item: {e}")
+            raise
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ read
+    def retrieve_item_by_id(self, item_id: str, partition_key: str) -> Optional[Dict[str, Any]]:
+        conn = self.config.connect()
+        try:
+            row = conn.execute(
+                f"SELECT payload FROM {self.table} WHERE id = ? AND doc_id = ?",
+                (item_id, partition_key),
+            ).fetchone()
+            return json.loads(row["payload"]) if row else None
+        except Exception as e:
+            logging.error(f"An error occurred while retrieving the item: {e}")
             return None
+        finally:
+            conn.close()
+
+    def retrieve_items_by_values(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+        unknown = set(filters) - self._FILTER_COLUMNS
+        if unknown:
+            raise ValueError(f"Filter columns not allowed: {sorted(unknown)}")
+        clauses = " AND ".join(f"json_extract(payload, '$.{col}') = ?" for col in filters)
+        params = [filters[col] for col in filters]
+        conn = self.config.connect()
+        try:
+            rows = conn.execute(
+                f"SELECT payload FROM {self.table}"
+                + (f" WHERE {clauses}" if clauses else ""),
+                params,
+            ).fetchall()
+            return [json.loads(row["payload"]) for row in rows]
+        except Exception as e:
+            logging.error(f"An error occurred while retrieving items: {e}")
+            return []
+        finally:
+            conn.close()
+
+    # ---------------------------------------------------------------- delete
+    def delete_items_by_values(self, filters: Dict[str, Any]) -> int:
+        """Delete items matching whitelisted filters; returns row count."""
+        unknown = set(filters) - self._FILTER_COLUMNS
+        if unknown:
+            raise ValueError(f"Filter columns not allowed: {sorted(unknown)}")
+        clauses = " AND ".join(f"json_extract(payload, '$.{col}') = ?" for col in filters)
+        params = [filters[col] for col in filters]
+        conn = self.config.connect()
+        try:
+            cursor = conn.execute(
+                f"DELETE FROM {self.table}" + (f" WHERE {clauses}" if clauses else ""),
+                params,
+            )
+            conn.commit()
+            return cursor.rowcount
+        except Exception as e:
+            logging.error(f"An error occurred while deleting items: {e}")
+            raise
+        finally:
+            conn.close()

@@ -1,26 +1,55 @@
-from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
+import sqlite3
+
 from config.config import settings
 
+# Tables that SQLiteDBClient is allowed to map "containers" onto.
+ALLOWED_TABLES = {"issues"}
 
-class CosmosDBConfig:
-    def __init__(self, container_name) -> None:
-        """Initialize Cosmos DB configuration using settings."""
-        self.cosmos_url = settings.cosmos_url
-        self.database_name = settings.database_name
-        self.container_name = container_name
 
-        # Initialize the Cosmos client
-        self.client = CosmosClient(self.cosmos_url, DefaultAzureCredential())
+class SQLiteDBConfig:
+    """SQLite connection factory (replaces CosmosDBConfig).
 
-    def get_client(self) -> CosmosClient:
-        """Return the initialized Cosmos client."""
-        return self.client
+    Single file under DATA_DIR/review.db; WAL mode for safe concurrent reads
+    on a single-process deployment.
+    """
 
-    def get_database_name(self) -> str:
-        """Return the database name."""
-        return self.database_name
-    
-    def get_container_name(self) -> str:
-        """Return the container name."""
-        return self.container_name
+    def __init__(self) -> None:
+        self.db_path = settings.database_path
+
+    def connect(self) -> sqlite3.Connection:
+        """Open a new connection with sane single-host pragmas applied."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    def init_db(self) -> None:
+        """Create tables and indexes if missing (idempotent)."""
+        settings.documents_dir.mkdir(parents=True, exist_ok=True)
+        settings.log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        conn = self.connect()
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS issues (
+                    id      TEXT NOT NULL,
+                    doc_id  TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (id, doc_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_issues_doc_id ON issues (doc_id);
+
+                CREATE TABLE IF NOT EXISTS users (
+                    username      TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    display_name  TEXT NOT NULL DEFAULT '',
+                    oid           TEXT NOT NULL
+                );
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
