@@ -1,3 +1,5 @@
+> **[2026-11] 时效说明**：本系列 wiki 记录的是 Azure 架构时期的实现细节，部分章节（Blob 直连、Cosmos、Entra/MSAL、PromptFlow、AML 端点）已不再适用。当前方案见 [README](../../README.md)、[local_deployment.md](../local_deployment.md) 与 [local-deployment-plan.md](../local-deployment-plan.md)。数据契约（Issue 模型与 SSE 事件）仍保持一致，其余请以最新文档为准。
+
 # 09 · 代码参考（符号索引）
 
 > 按模块分组的 symbol → file:line 映射（基准 commit `c91254a`）。kind：函数 fn / 类 cls / 方法 m / 常量 const / 路由 rt / 组件 cmp。

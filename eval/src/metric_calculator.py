@@ -1,6 +1,10 @@
 import json
-import promptflow
 from collections import defaultdict
+
+try:  # Legacy PromptFlow logging; only required by write_metrics_to_promptflow_per_type.
+    import promptflow
+except ImportError:  # local deployment does not ship promptflow
+    promptflow = None
 
 class MetricsCalculator:
     def __init__(self, issue_associator):
@@ -203,7 +207,13 @@ class MetricsCalculator:
     def write_metrics_to_promptflow_per_type(metrics: dict):
         """
         Write metrics per type to the Promptflow dashboard.
+        Legacy: requires the promptflow package (not part of the local deployment).
         """
+        if promptflow is None:
+            raise RuntimeError(
+                "promptflow is not installed; write_metrics_to_promptflow_per_type "
+                "is a legacy helper — see legacy/README.md."
+            )
         # Log all metrics for each type
         for metric_name, metric_per_type in metrics.items():
             for issue_type, val in metric_per_type.items():

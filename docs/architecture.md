@@ -1,116 +1,89 @@
-# Architecture Overview
+# 架构说明（本地部署版）
 
-![Architecture Overview](./images/arch.drawio.png)
+## 总体形态
 
-## Components
-
-**UI & API App**
-_(Azure App Service)_
-
-- A React frontend for document upload, review, and feedback submission, including:
-  - Document upload and retrieval client-side to Azure Blob Storage.
-  - PDF Viewer with annotation capabilities.
-  - Real-time streaming to API for review results.
-- A Python REST API built using FastAPI, serving:
-  - Static assets for the React frontend (JavaScript, CSS, HTML).
-  - Interactions with Azure services such as Cosmos DB and PromptFlow endpoints.
-  - Streaming connections for real-time feedback and results.
-  - Feedback submission to Cosmos DB.
-
-**State Store**
-_(Azure Cosmos DB)_
-
-- Stores document analysis results and user feedback.
-- Configurations:
-  - Advanced Threat Protection enabled.
-  - System Assigned Managed Identity.
-  - CORS and local authentication disabled.
-
-**AI Platform**
-_(Azure AI Foundry Hub)_
-
-- Azure AI Services:
-  - GPT model deployments for domain-specific document analysis.
-  - Configured with System Assigned Managed Identity and restricted public access.
-- PromptFlow:
-  - Used for authoring and orchestrating AI workflows from document ingestion to invoking agents and yielding results.
-  - Endpoints deployed to Azure App Service for hosting (instead of ML-managed Online Endpoints due to [timeout limitation](https://learn.microsoft.com/en-us/azure/machine-learning/how-to-manage-quotas?view=azureml-api-2#azure-machine-learning-online-endpoints-and-batch-endpoints) of 180s for long-running streams).
-  - Monitoring and traceability using Application Insights.
-- Key Vault:
-  - Securely manages keys and credentials.
-  - Configured with system-assigned identities, audit logging, and soft delete.
-- Storage Account:
-  - Securely stores PDF documents, PromptFlow files, inference inputs and outputs.
-  - Configurations: secure transfer, private network access, and TLS 1.2.
-- Azure Container Registry (ACR):
-  - Hosts private containers used by AI Foundry.
-  - Configured with managed identities and disabled anonymous pull.
-
-## User/Data Flow
+单容器应用：React UI（静态托管）、FastAPI、审阅引擎同进程运行；状态落在挂载卷 `./data/`；唯一外部依赖是 OpenAI 兼容的大模型端点。
 
 ```mermaid
-sequenceDiagram
-actor U as User
-participant UI as Web UI
-participant API as API
-participant DB as State Store
-participant DS as Document Storage
-participant ML as AI Foundry + PromptFlow
-participant AI as Azure OpenAI models
-participant ED as Evaluation Datastore
-
-    U-->>UI: Upload document
-    UI-->>DS: Store document [PDF] [Document ID]
-    U-->>UI: Select and Review document
-    UI-->>API: Initiate check (open stream) [DocumentID]
-    API-->>ML: Initiate check (open stream) [ML Token] [Document ID]
-    ML-->>ED: Store input [PDF] [Document ID]
-    ML-->>DS: Retrieve document [Document ID]
-    ML-->>AI: Initiate agents
-    AI-->>ML: [Result chunk]
-    ML-->>API: [Result chunk]
-    API-->>UI: [Result chunk]
-    API-->>DB: Store issues [Results]
-    AI-->>ML: [Result chunk]
-    ML-->>API: [Result chunk]
-    API-->>UI: [Result chunk]
-    API-->>DB: Store issues [Results]
-    ML-->>ED: Store output [Results] [CorrelationID]
-    U-->>U: Review results
-    U-->>UI: Accept/dismiss issues
-    UI-->>API: Post feedback [CorrelationID] [Accept/Dismiss] [Reason]
-    API-->>DB: Store feedback
-
+flowchart LR
+    B["浏览器<br/>React + react-pdf"]
+    subgraph APP["app 容器（docker compose，单服务）"]
+        UI["React UI<br/>静态托管于 FastAPI"]
+        API["FastAPI<br/>JWT 认证 / 文档 API / SSE"]
+        ENG["审阅引擎（纯 Python DAG）<br/>PyMuPDF 抽取 + 多 Agent 检出"]
+        DB[("SQLite<br/>data/review.db")]
+        FS[("本地文件<br/>data/documents/*.pdf")]
+    end
+    LLM["OpenAI 兼容大模型端点<br/>(OpenAI / DeepSeek / Qwen /<br/>Moonshot / 内网 vLLM …)"]
+    B -- "HTTPS + JWT" --> API
+    UI --> B
+    API --> ENG
+    API --> DB
+    API --> FS
+    ENG -- "文本分块（唯一出域点）" --> LLM
 ```
 
-## Cost + Scaling
+> **数据出域边界**：PDF 原件、issues、账号、日志全部留在本地；审阅时抽取出的文本分块会发往 LLM 端点。涉敏文档须数据不出内网时，将 `LLM_BASE_URL` 指向内网 vLLM/SGLang 部署的大参数开源模型，应用侧零改动。
 
-- **Azure App Service**: A single plan is utilised across the API and Flow endpoints. Automatic scaling rules can be added to handle spikes in traffic while keeping costs optimised.
-- **Azure ML Compute**: Uses serverless compute by default for cost-efficient scalability.
-- **Azure OpenAI**: Global Standard Deployments are used with pay-per-call billing for high availability and load balancing across regions for higher token limits.
+## 组件对照（Azure → 本地）
 
-### Considerations
+| Azure 服务 | 现方案 | 说明 |
+|---|---|---|
+| Blob Storage（浏览器直连） | 文档 API + 本地文件系统 | 上传/列表/下载/删除走 `/api/v1/documents`，JWT 保护 |
+| Cosmos DB | SQLite（WAL） | `data/review.db`；客户端接口签名与原实现一致，便于回溯 |
+| Document Intelligence | PyMuPDF | 构造 DI 同形的 paragraphs/pages/words 结构（全局字符 offset、pt→英寸），包围盒算法原样复用 |
+| Azure OpenAI / AML 端点 | OpenAI 兼容客户端 | `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` 三项切换厂商 |
+| PromptFlow DAG | 纯 Python 流水线 | `flows/ai_doc_review/pipeline.py`；提示词模板原样保留 |
+| Entra ID + MSAL | 本地账号 + JWT | PBKDF2 口令哈希 + PyJWT (HS256)；`AUTH_DISABLED=true` 可免登录 |
+| Application Insights | 本地日志 | console + `data/logs/app.log`，不记录 prompt 正文与密钥 |
+| Terraform / App Service | Dockerfile + Compose | `task up` 一键启动 |
 
-Whilst a good general baseline is illustrated in the accelerator, the following considerations should be taken into account when customising for your specific use case and organisational requirements:
+## 审阅流水线（`flows/ai_doc_review/`）
 
-- Data residency requirements: do GPT models need to be hosted in a specific region? If so, Global Standard may not be suitable.
-- Anticipated tokens-per-minute usage: if high and/or predictable, pre-purchasing quota may provide significant cost savings.
-- Model versions: if wanting to use a new version of GPT or another model, this may only be available in certain regions or with specific deployment types.
+```
+PDF ──► text.py（PyMuPDF 抽取 + 可选 OCR）
+        ├─ paragraphs（= PDF block，起始 offset 与词边界对齐）
+        ├─ pages[].words[]（词级 bbox，pt÷72 转英寸）
+        └─ get_text_chunks() 按 PARAGRAPHS_PER_CHUNK 切块
+     ──► pipeline.py
+        ├─ 每 chunk × LLM_SHOTS 并发调用 agent.jinja2（5-shot 检出）
+        ├─ 按 (type, source_sentence) 去重，分配 comment_id
+        ├─ consolidator.jinja2 整合（评分 + KEEP/REMOVE 判定）
+        ├─ 过滤 REMOVE，add_bounding_box() 回填坐标
+        └─ 按 chunk 产出 FlowOutputChunk → SSE
+```
 
-Take a look at this [guidance](https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/manage-costs) for more information on planning and managing costs with Azure AI Services.
+- 单 shot 或 consolidator 失败只降级当前 chunk，不中断整次审阅。
+- 429/5xx/超时指数退避重试与 JSON 校验重试分开计数；记录 token usage 便于控成本。
+- 优先 `response_format=json_schema` 严格结构化输出；端点不支持时自动降级 `json_object` 并将 schema 注入提示词。
 
-## Security
+## API 契约
 
-### Networking
+- `POST /api/v1/auth/login` / `GET /api/v1/auth/me` / `GET /api/v1/auth/config` / `POST /api/v1/auth/logout`
+- `POST /api/v1/documents`（multipart 上传）、`GET /api/v1/documents`、`GET /api/v1/documents/{name}/file`、`DELETE /api/v1/documents/{name}`
+- `POST /api/v1/review/{doc_id}/issues` — SSE，事件类型 `issues` / `complete` / `error`
+- `PATCH /api/v1/review/issues/{id}/status`、`/suggestion`、`/dismissal-feedback`
+- `GET /api/health` — LLM 三项配置齐全返回 `ok`，否则 `degraded`
 
-- [Network Security Perimeter](https://learn.microsoft.com/en-us/azure/private-link/network-security-perimeter-concepts) is used to secure Platform-as-a-Service resources including Cosmos DB within a private network. This can be modified with access rules to limit inbpound and outbound traffic to specified destinations.
-- [Managed Network](https://learn.microsoft.com/en-us/azure/ai-studio/how-to/configure-managed-network?tabs=portal) is enabled for Azure AI Foundry Hub to secure its resources within a private network. This can be further configured to restrict outbound traffic to specific IP ranges or services.
+Issue 数据模型见 `common/models.py`（与 Azure 时期完全一致）。
 
-### Secret Management
+## 目录结构
 
-- [Managed Identities](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview): utilised across all resources for service-to-service communication, ensuring secure, passwordless authentication across services utilising RBAC authorization.
+```
+app/api/        FastAPI：routers（auth/documents/issues）、security、database、services
+app/ui/         React + Fluent UI + react-pdf（构建产物输出 app/api/www）
+common/         共享数据模型与日志
+flows/ai_doc_review/  审阅引擎：text/ocr/llm/pipeline/engine/bounding_box + prompts/
+eval/           指标评估（读取本地 SQLite）
+legacy/         已退役的 Azure 资产（只读历史）
+```
 
-### User Management
+## 安全设计
 
-- Authentication for end-users the UI, API and Storage is controlled via [Entra ID IAM](https://learn.microsoft.com/en-us/entra/fundamentals/introduction-identity-access-management?toc=%2Fentra%2Fidentity-platform%2Ftoc.json&bc=%2Fentra%2Fidentity-platform%2Fbreadcrumb%2Ftoc.json). Named users and groups can be assigned roles and permissions to control access to resources.
-- An `ml_engineers` Entra ID group is created as part of infrastructure deployment to provide access to the Azure AI Foundry Hub, with the required permissions to author, test and deploy PromptFlow flows.
+- JWT 存于浏览器 sessionStorage（关闭标签页即失效），不出现在 URL。
+- CORS 显式白名单；异常响应脱敏，不回显内部信息。
+- 上传校验 `%PDF` 魔数与大小上限；文件名白名单防路径穿越。
+- 数据库过滤列走白名单 + `json_extract`，防注入。
+- 日志只记 token 用量与错误码，不记 prompt 正文与密钥。
+
+历史架构（Azure 时期）的实现细节 wiki 保留在 [docs/wiki/](./wiki/README.md)，仅供历史参考。

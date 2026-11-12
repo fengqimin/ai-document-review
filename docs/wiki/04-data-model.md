@@ -1,3 +1,5 @@
+> **[2026-11] 时效说明**：本系列 wiki 记录的是 Azure 架构时期的实现细节，部分章节（Blob 直连、Cosmos、Entra/MSAL、PromptFlow、AML 端点）已不再适用。当前方案见 [README](../../README.md)、[local_deployment.md](../local_deployment.md) 与 [local-deployment-plan.md](../local-deployment-plan.md)。数据契约（Issue 模型与 SSE 事件）仍保持一致，其余请以最新文档为准。
+
 # 04 · 数据模型
 
 > 存储为 Azure Cosmos DB（NoSQL，无 DDL/schema 迁移）。本环境无法连接真实数据库，**实际容器数据快照、分区键策略与 RU 消耗：未验证**；以下结构均来自代码证据。

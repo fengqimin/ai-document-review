@@ -1,3 +1,6 @@
+
+> **[2026-11] 时效说明**：本目录文档基于旧评估链路编写；§7 的 PromptFlow 指标上报为 legacy 功能（需另装 promptflow 包），其余部分（IssueAssociator 相似度关联、指标计算）与本地 SQLite 数据仍兼容。
+
 # IssueAssociator
 
 ## Overview

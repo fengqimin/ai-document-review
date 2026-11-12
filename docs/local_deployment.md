@@ -1,0 +1,110 @@
+# 本地部署指南
+
+应用完全本地运行：UI、API、审阅引擎在同一个容器里，数据（SQLite、PDF、日志）落在 `./data/`，唯一的外部依赖是一个 OpenAI 兼容协议的大模型端点。
+
+## 一键部署（Docker）
+
+```bash
+cp .env.example .env
+# 编辑 .env：填入 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
+docker compose up -d --build
+```
+
+打开 <http://localhost:8000>，默认账号 `admin / admin123`。**首次登录后请立即在 `.env` 中修改 `ADMIN_PASSWORD` 与 `JWT_SECRET` 并重启**。
+
+数据备份：直接拷贝 `./data/` 目录即可（含 `review.db`、`documents/`、`logs/`）。
+
+```bash
+docker compose down   # 停止，data/ 保留
+task logs             # 跟踪日志
+```
+
+## 不用 Docker 运行
+
+```bash
+python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+cd app/ui && npm install && npm run build && cd ../..   # UI 构建到 app/api/www
+cd app/api && ../../.venv/bin/python -m uvicorn main:app --port 8000
+```
+
+## 配置 LLM 端点（厂商中立）
+
+`LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` 三项必填。任何实现 OpenAI Chat Completions 协议的服务均可：
+
+| 厂商 | LLM_BASE_URL | 模型示例 |
+|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| 通义千问（兼容模式） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-max` |
+| Moonshot | `https://api.moonshot.cn/v1` | `moonshot-v1-128k` |
+| 内网 vLLM / SGLang | `http://<host>:8000/v1` | 服务端 `--served-model-name` |
+
+切换厂商只改 `.env` 三行，代码与提示词不动。
+
+### 数据出域与合规
+
+- 审阅时**抽取出的文本分块**会发往上述端点——这是唯一出域点。
+- PDF 原件、审阅结果、账号、日志全部留在本地。
+- 涉敏文档要求数据不出内网时：用内网 GPU 通过 [vLLM](https://github.com/vllm-project/vllm) 或 SGLang 部署大参数开源模型（如 Qwen2.5-72B-Instruct），`LLM_BASE_URL` 指向内网地址即可，应用侧零改动。
+- 日志只记录 token 用量与错误码，不记录 prompt 正文；API Key 仅保存在 `.env`（不入镜像、不入 git）。
+
+## 关键配置项
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | 空 | 必填；不配置时服务以 degraded 状态启动，审阅返回明确错误 |
+| `LLM_STRICT_JSON` | `true` | 优先 `json_schema` 结构化输出，端点不支持时自动降级 `json_object` |
+| `LLM_SHOTS` | `5` | 每 chunk 并发检出轮数（越高召回越好，token 消耗线性增加） |
+| `LLM_MAX_WORKERS` | `2` | 并发 LLM 请求数，注意厂商限流 |
+| `LLM_TRANSIENT_RETRIES` / `LLM_MAX_RETRIES` | `5` / `2` | 429/5xx 退避重试 / JSON 校验重试（分开计数） |
+| `PARAGRAPHS_PER_CHUNK` | `16` | 每个审阅块的段落数 |
+| `AUTH_DISABLED` | `false` | `true` 时免登录（仅限单机可信环境） |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 仅首次建库生效 |
+| `JWT_SECRET` / `JWT_EXPIRE_MINUTES` | 占位值 / `480` | 暴露服务前必须修改 |
+| `OCR_ENABLED` / `OCR_LANGUAGES` | `false` / `eng` | 扫描件 OCR（需镜像内含 tesseract） |
+| `MAX_UPLOAD_MB` | `50` | 上传大小上限 |
+
+完整列表见 `.env.example`。
+
+## 扫描件 OCR（可选）
+
+默认镜像不含 Tesseract。需要处理扫描版 PDF 时，基于根 `Dockerfile` 追加：
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      tesseract-ocr tesseract-ocr-chi-sim && rm -rf /var/lib/apt/lists/*
+RUN pip install pytesseract Pillow
+```
+
+并在 `.env` 设 `OCR_ENABLED=true`、`OCR_LANGUAGES=eng+chi_sim`。纯文本 PDF 不受影响。
+
+## 从旧版 Azure 部署迁移
+
+- **issues 数据**：从 Cosmos DB 导出 JSON 后按 `common/models.py` 结构整理，批量插入 `data/review.db` 的 `issues` 表（payload 为 JSON 列）。
+- **PDF 原件**：从 Blob 下载后放入 `data/documents/`（文件名即 doc_id）。
+- **用户**：无迁移——本地账号首次建库自动引导，旧 Entra 账号需重建。
+- 原 Terraform/部署资产保留在 [`legacy/`](../legacy/README.md)（含销毁旧资源的入口）。
+
+## 故障排查
+
+| 现象 | 处理 |
+|---|---|
+| `/api/health` 一直 `degraded` | `.env` 的 LLM 三项未配齐；容器内 `docker compose exec app env \| grep LLM_` 确认 |
+| 审阅 SSE 返回 error：LLM not configured | 同上 |
+| 429 / rate limit | 调低 `LLM_MAX_WORKERS`、`LLM_SHOTS`，或确认厂商配额 |
+| JSON 解析失败频繁 | 厂商对 `json_schema` 支持差时设 `LLM_STRICT_JSON=false`（自动走 `json_object` + schema 注入） |
+| 高亮缺失但 issue 正常 | 段落切分与原 Document Intelligence 存在差异属预期行为，审阅不中断 |
+| 登录后立即 401 | `JWT_SECRET` 与签发时不一致（改过未重启）；清 sessionStorage 重新登录 |
+| 容器起不来 | `docker compose logs app`；确认 8000 端口未被占用 |
+
+## 端到端自检
+
+不消耗真实 token 的自检方式：
+
+```bash
+.venv/bin/python -m pytest flows/ai_doc_review/tests app/api/tests -q
+# 33 例覆盖：抽取/包围盒、去重/REMOVE 过滤、mock OpenAI 服务的请求体与
+# schema 降级/退避、端到端分块流、认证/上传/下载/路径穿越防御
+```
+
+更多背景：[架构说明](./architecture.md) · [迁移设计方案](./local-deployment-plan.md)

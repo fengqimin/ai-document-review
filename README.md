@@ -1,83 +1,50 @@
-# AI Document Review
+# AI Document Review (local deployment)
 
-The _AI Document Review_ Solution Accelerator is a powerful and customizable solution that brings together the latest AI agentic patterns and services to enhance the review process for documents across various domains where compliance and accuracy of content is critical. Whether it's legal, regulatory, technical, or other types of content, users can define specific "review agents" through guideline prompts to determine what issues Large Language Models (LLMs) should look for, making the tool adaptable to a wide range of use cases and an ideal place to start for teams looking to streamline their document review processes using AI.
+AI Document Review 是一个可本地部署的文档审阅加速器：用户通过 Web UI 上传 PDF，由多个基于大模型的审阅 Agent 依据可定制的 guideline 提示词检出语法、绝对化用语等问题，流式返回带页码与包围盒定位的结果，支持接受/驳回与反馈回流。适用于法律、监管、技术等对内容合规与准确性要求较高的场景。
 
-Built on Azure AI Foundry, Azure AI Services (including Document Intelligence and Azure OpenAI models) and integrated with Azure Storage and Azure Cosmos DB, the accelerator demonstrates a robust design for ingesting documents, extracting text, identifying issues using AI agents, and displaying the results to users in a web UI, and provides a pattern for feedback collection, evaluation and continual prompt improvement, all of which can be built upon for your own production use cases.
+**当前版本为本地优先（local-first）架构**：应用、UI、PDF 原件、审阅结果与账号数据全部留在本地；唯一的外部依赖是一个 OpenAI 兼容协议的大模型端点（`LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL`，可指向 OpenAI、DeepSeek、通义、Moonshot 或内网 vLLM 等）。原 Azure 版本（Blob Storage、Cosmos DB、Document Intelligence、Azure OpenAI、Entra ID、Application Insights、AML 部署）已整体退役，相关资产移入 [`legacy/`](./legacy/README.md)。
 
 ![UI](./docs/images/ui_review_issues.png)
 
-### How It Works
+## 工作流程
 
-1. **Upload PDF Documents**: Users provide PDF files through the web interface.
-1. **Define Domains via AI Prompts**: Users can either choose from a set of pre-configured example prompts or create their own custom prompts for specific document domains (e.g., legal, technical).
-1. **Automated Text Extraction**: Document Intelligence extracts the text content from the document.
-1. **AI Analysis**: The application uses the provided AI guideline prompts to identify issues within the document.
-1. **Actionable Feedback**: Users receive a list of issues with explanations and suggestions for addressing them.
-1. **Interactive Review**: Issues can be accepted or dismissed by the user within the web application, and feedback can be provided on each dismissed issue to improve the agents' prompts over time.
+1. **上传 PDF**：经文档 API 上传（本地文件存储，不再直连 Blob）。
+2. **文本抽取**：PyMuPDF 抽取段落/词级文本与坐标，构造与 Document Intelligence 同形的数据结构；扫描件可选启用 Tesseract OCR。
+3. **多 Agent 审阅**：按 chunk 并发发起多轮（默认 5-shot）检出 → 去重 → consolidator 整合 → 合并过滤，LLM 通过 OpenAI 兼容协议调用，结构化输出（`json_schema`，不支持时自动降级）。
+4. **流式结果**：SSE 推送 issue 事件，前端 PDF 高亮定位。
+5. **人工复核**：接受/驳回 issue 并提交反馈。
 
-### Key Features
+## 快速开始
 
-- **Customizable AI Agents**: Define domain-specific AI prompts to tailor the analysis to any type of document content.
-- **AI-Powered Text Extraction and Analysis**: Leverages Document Intelligence for advanced text extraction including OCR (text within image) support.
-- **Interactive Feedback**: Easy-to-use interface that allows users to upload documents, view previously reviewed documents, initiate new reviews and interact with the results.
-- **Secure and Scalable**: Built to handle documents with strict security requirements, including utilising private networking through [Network Security Perimeters](https://learn.microsoft.com/en-us/azure/private-link/network-security-perimeter-concepts) and securing resource access through service and user identities using Entra.
-- **Example Prompts**: A set of pre-configured domain prompts is included to get you started quickly.
-- **Feedback Loop**: Built-in mechanisms to collect feedback on the AI agents' performance, evaluate the effectiveness of your prompts to improve the quality of the review process over time.
-- **CI/CD**: Automated deployment pipelines out of the box for the application and infrastructure using GitHub Actions and Terraform.
+```bash
+cp .env.example .env       # 填入 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
+docker compose up -d --build
+# 打开 http://localhost:8000 ，默认账号 admin / admin123（首次登录后请修改）
+```
 
-### Architecture
+不使用 Docker 时：
 
-![Architecture Overview](./docs/images/arch.drawio.png)
+```bash
+task api-install           # 或手动 python -m venv .venv && pip install -r requirements.txt
+task ui-install && task ui-build
+cd app/api && ../../.venv/bin/python -m uvicorn main:app --port 8000
+```
 
-View the full component list and architecture details in the [Architecture page](./docs/architecture.md).
+详见 [docs/local_deployment.md](./docs/local_deployment.md)（配置项、厂商切换、OCR、数据迁移与故障排查）。
 
-## Getting Started
+## 文档索引
 
-Please see the [Getting Started](./docs/getting_started.md) guide for detailed instructions on setting up your development environment and deploying the solution.
+- [架构说明](./docs/architecture.md) — 组件、数据流、API 契约
+- [本地部署指南](./docs/local_deployment.md) — 一键部署、环境变量、模型端点配置
+- [迁移设计方案](./docs/local-deployment-plan.md) — Azure → 本地方案的完整设计稿（组件对照、兼容性桥、风险）
+- [开发指南](./docs/getting_started.md) — 本地开发环境、测试、目录结构
+- [docs/wiki/](./docs/wiki/README.md) — 历史架构时期的实现细节 wiki（Azure 时期，仅供历史参考）
+- [legacy/](./legacy/README.md) — 已退役的 Azure 部署资产（Terraform、PromptFlow、CI 等）
 
-## What Next?
+## 定制审阅 Agent
 
-### Customize the AI Agents
-
-Define your own prompts to tailor the analysis to your specific document content.
-
-- Review the [LLM App](./docs/promptflow/llm_app.md) documentation for more information on how to create and manage new agents and their prompts.
-
-### Evaluate & improve your prompts
-
-Implement a feedback loop to collect feedback on the AI agents' performance from your users and improve the quality of the review process over time.
-
-- Review the [LLM Ops](./docs/llm_ops.md) guide for ideas on how to collect and evaluate feedback and monitor the performance of your prompts.
-
-### Integrate with Your Systems
-
-Extend the solution to integrate with your existing systems and workflows. For example, you could integrate with a document management system to automatically load and process new documents, and post accepted review comments from the AI agents.
+审阅规则完全由提示词驱动：在 `flows/ai_doc_review/prompts/` 下为每个 issue 类型维护 `guidelines.jinja2`（审阅准则）、`agent.jinja2`（检出提示）与 `consolidator.jinja2`（整合提示）。新增审阅维度只需新增一组提示词与 Pydantic 模型，无需改动引擎。
 
 ## Contributing
 
-This project welcomes contributions and suggestions. Most contributions require
-you to agree to a Contributor License Agreement (CLA) declaring that you have
-the right to, and actually do, grant us the rights to use your contribution. For
-details, visit https://cla.opensource.microsoft.com.
-
-When you submit a pull request, a CLA bot will automatically determine whether
-you need to provide a CLA and decorate the PR appropriately (e.g., status check,
-comment). Simply follow the instructions provided by the bot. You will only need
-to do this once across all repos using our CLA.
-
-This project has adopted the
-[Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the
-[Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any
-additional questions or comments.
-
-## Trademarks
-
-This project may contain trademarks or logos for projects, products, or
-services. Authorized use of Microsoft trademarks or logos is subject to and must
-follow
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must
-not cause confusion or imply Microsoft sponsorship. Any use of third-party
-trademarks or logos are subject to those third-party's policies.
+见 [CONTRIBUTING.md](./CONTRIBUTING.md) 与 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)。

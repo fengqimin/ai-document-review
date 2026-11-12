@@ -13,7 +13,7 @@ flows/.env
 .task
 docs
 eval
-infra
+legacy
 src
 *.md
 !app/api/README.md
