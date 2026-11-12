@@ -1,4 +1,12 @@
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+# The API is run with cwd=app/api; the shared `common` package and the flows
+# package live at the repository root, so make it importable first.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from common.logger import get_logger
 from config.config import settings

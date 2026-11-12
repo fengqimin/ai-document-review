@@ -1,11 +1,11 @@
-import { BlobItem } from '@azure/storage-blob';
 import { Button, Caption1, Card, CardHeader, CardPreview, Dialog, DialogBody, DialogContent, DialogSurface, DialogTitle, Divider, makeStyles, MessageBar, MessageBarBody, MessageBarTitle, ProgressBar, SkeletonItem, Text, tokens } from '@fluentui/react-components';
 import { ArrowUploadRegular, MoreHorizontal20Regular } from '@fluentui/react-icons';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import aiDocIcon from '../../assets/ai-doc.png';
 import pdfIcon from '../../assets/pdf.svg';
-import { listBlobs, uploadBlob } from '../../services/storage';
+import { DocumentInfo } from '../../types/document';
+import { listDocuments, uploadDocument } from '../../services/storage';
 
 const flex = {
   gap: "16px",
@@ -53,7 +53,7 @@ const useStyles = makeStyles({
 });
 
 function Files() {
-  const [fileList, setFileList] = useState<BlobItem[]>();
+  const [fileList, setFileList] = useState<DocumentInfo[]>();
   const [blobError, setBlobError] = useState<string>();
   const [uploading, setUploading] = useState<boolean>(false);
 
@@ -63,10 +63,10 @@ function Files() {
   useEffect(() => {
     async function loadFileList() {
       try {
-        const files = await listBlobs();
+        const files = await listDocuments();
         setFileList(files);
       } catch (error: any) {
-        setBlobError('Error loading files from storage: ' + error.message);
+        setBlobError('Error loading files from local storage: ' + error.message);
       }
     }
 
@@ -86,12 +86,12 @@ function Files() {
       const file = event.currentTarget.files[0];
       console.log(file);
       setUploading(true);
-      
+
       try {
-        await uploadBlob(file);
+        await uploadDocument(file);
         openDocument(file.name);
       } catch (error: any) {
-        setBlobError('Error uploading file to blob storage: ' + error.message);
+        setBlobError('Error uploading file: ' + error.message);
       } finally {
         setUploading(false);
       }
@@ -165,7 +165,7 @@ function Files() {
                   header={<Text weight="semibold">{file.name}</Text>}
                   description={
                     <Caption1 className={classes.caption}>
-                      Updated { file.properties?.lastModified.toLocaleDateString() }
+                      Updated { new Date(file.last_modified).toLocaleDateString() }
                     </Caption1>
                   }
                   action={

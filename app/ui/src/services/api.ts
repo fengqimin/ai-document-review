@@ -1,7 +1,5 @@
-import { InteractionRequiredAuthError } from '@azure/msal-browser'
-import { EventSourceMessage, fetchEventSource } from '@microsoft/fetch-event-source'
-import { accessTokenRequest } from '../authConfig'
-import { msalInstance } from '../main'
+import { fetchEventSource, EventSourceMessage } from '@microsoft/fetch-event-source'
+import { getAccessToken } from '../auth'
 import { FatalError, RetriableError } from '../types/error'
 
 const apiBaseUrl = '/api/v1/review/'
@@ -9,25 +7,9 @@ const unknownError = 'an unknown error occurred. Please try again.'
 
 class AbortedError extends Error {}
 
-export async function getAccessToken() {
-  const account = msalInstance.getActiveAccount()!
-
-  try {
-    const tokenResponse = await msalInstance.acquireTokenSilent({
-      ...accessTokenRequest,
-      account
-    })
-    return tokenResponse.accessToken
-  } catch (err) {
-    console.warn('Unable to get a token silently', err)
-    if (err instanceof InteractionRequiredAuthError) {
-      const tokenResponse = await msalInstance.acquireTokenPopup({
-        ...accessTokenRequest,
-        account
-      })
-      return tokenResponse.accessToken
-    }
-  }
+function authHeaders(): Record<string, string> {
+  const token = getAccessToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 async function getErrorMessage(response: Response): Promise<string> {
@@ -60,11 +42,9 @@ async function getErrorMessage(response: Response): Promise<string> {
 }
 
 export async function callApi(path: string, method = 'GET', body?: object) {
-  const token = await getAccessToken()
-
   const response = await fetch(apiBaseUrl + path, {
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...authHeaders(),
       'Content-Type': 'application/json'
     },
     method,
@@ -93,12 +73,8 @@ export async function streamApi(
   let retries = 0
 
   async function startStream() {
-    const token = await getAccessToken()
-
     fetchEventSource(apiBaseUrl + path, {
-      headers: {
-        Authorization: `Bearer ${token}`
-      },
+      headers: authHeaders(),
       signal: abortControllerRef.signal,
       async onopen(response) {
         if (abortControllerRef.signal.aborted) {

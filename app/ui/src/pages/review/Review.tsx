@@ -8,7 +8,7 @@ import { useSearchParams } from 'react-router-dom';
 import { IssueCard } from '../../components/IssueCard';
 import { addAnnotation, deleteAnnotation, initAnnotations } from '../../services/annotations';
 import { streamApi } from '../../services/api';
-import { getBlob } from '../../services/storage';
+import { getDocument } from '../../services/storage';
 import { AgentConfig } from '../../types/agent-config';
 import { APIEvent } from '../../types/api-events';
 import { Issue, IssueStatus } from '../../types/issue';
@@ -225,21 +225,21 @@ function Review() {
     }
   }, [searchParams]);
 
-  // Load PDF from blob storage
+  // Load PDF from the local document API
   useEffect(() => {
     async function loadPdf(docId: string) {
       try {
-        const pdfBlob = await getBlob(docId);
+        const pdfBlob = await getDocument(docId);
         const pdfByteArray = new Uint8Array(await pdfBlob.arrayBuffer());
         // Initialise the annotation later
         const pdfBytesWithAnnot = initAnnotations(pdfByteArray);
         setPdfData({ data: pdfBytesWithAnnot });
       } catch (error) {
-        let message = 'Error loading PDF from blob storage';
+        let message = 'Error loading PDF from the document API';
         if (error instanceof Error) {
           message += ': ' + error.message;
         }
-        setPdfLoadError('Error loading PDF from blob storage: ' + message);
+        setPdfLoadError('Error loading PDF: ' + message);
       }
     }
 
@@ -308,10 +308,11 @@ function Review() {
               issues
                 // Apply status and type filters
                 .filter((issue) => statusFilter.includes(issue.status) && !hideTypesFilter.includes(issue.type))
-                // Sort by bounding box top to bottom
-                .sort((a, b) => b.location.bounding_box[1] - a.location.bounding_box[1])
-                // And in page order
-                .sort((a, b) => a.location.page_num - b.location.page_num)
+                // Sort by bounding box top to bottom (null-safe: issues without
+                // a bounding box sort last within their page)
+                .sort((a, b) => (b.location?.bounding_box?.[1] ?? -Infinity) - (a.location?.bounding_box?.[1] ?? -Infinity))
+                // And in page order (null-safe)
+                .sort((a, b) => (a.location?.page_num ?? Infinity) - (b.location?.page_num ?? Infinity))
                 .map((issue) => (
                   <IssueCard
                     key={issue.id}
