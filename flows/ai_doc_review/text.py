@@ -15,7 +15,7 @@ Rules:
 import logging
 from typing import List
 
-import fitz
+import pymupdf as fitz
 from more_itertools import batched
 
 from flows.ai_doc_review.document import (

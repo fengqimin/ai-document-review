@@ -6,17 +6,17 @@ output: "prefixed"
 
 tasks:
   check:
-    desc: Check local toolchain (node, python, docker).
+    desc: Check local toolchain (uv, node, git, docker).
     silent: true
     cmds:
       - |
-        for tool in node python3 git; do
+        for tool in uv node git; do
           if ! command -v "$tool" > /dev/null; then
-            echo "ERROR: $tool is not installed."
+            echo "ERROR: $tool is not installed. Install uv: https://docs.astral.sh/uv/"
             exit 1
           fi
         done
-        echo "node $(node -v) | $(python3 --version)"
+        echo "uv $(uv --version | cut -d' ' -f2) | node $(node -v)"
         if command -v docker > /dev/null; then
           echo "docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
         else
@@ -24,27 +24,29 @@ tasks:
         fi
 
   # ------------------------------------------------------------------ install
+  install:
+    desc: Sync the Python 3.14 environment (uv) and install frontend deps.
+    cmds:
+      - uv sync
+      - task: ui-install
+
+  api-install:
+    desc: Sync Python dependencies only (uv, Python 3.14).
+    cmds:
+      - uv sync
+
   ui-install:
     desc: Install frontend dependencies.
     dir: app/ui
     cmds:
       - npm install --no-audit --no-fund
 
-  api-install:
-    desc: Create/refresh a local venv and install backend + pipeline deps.
-    cmds:
-      - python3 -m venv .venv
-      - .venv/bin/python -m pip install --quiet -r requirements.txt
-      - .venv/bin/python -m pip install --quiet pytest
-
-  install: ui-install api-install
-
   # ------------------------------------------------------------------ dev
   dev-api:
     desc: Run the FastAPI backend (http://localhost:8000, auto-reload).
     dir: app/api
     cmds:
-      - ../../.venv/bin/python -m uvicorn main:app --reload --port 8000
+      - uv run --project ../.. uvicorn main:app --reload --port 8000
 
   dev-ui:
     desc: Run the vite dev server (http://localhost:5173, proxies /api).
@@ -64,19 +66,25 @@ tasks:
       - npm run build
 
   test:
-    desc: Run backend and pipeline tests (pytest).
+    desc: Run backend and pipeline tests (pytest, via uv).
     cmds:
-      - .venv/bin/python -m pytest flows/ai_doc_review/tests app/api/tests -q
+      - uv run pytest -q
 
   check-code:
-    desc: Compile-check all Python sources.
+    desc: Compile-check all Python sources on 3.14.
     cmds:
-      - .venv/bin/python -m compileall -q app/api common flows/ai_doc_review
+      - uv run python -m compileall -q app/api common flows/ai_doc_review
       - echo "COMPILE OK"
+
+  lock:
+    desc: Refresh uv.lock after editing pyproject.toml, then re-export requirements.txt.
+    cmds:
+      - uv lock
+      - uv export --format requirements-txt --no-hashes --no-emit-project --no-dev --output-file requirements.txt
 
   # ------------------------------------------------------------------ docker
   docker-build:
-    desc: Build the single-container image.
+    desc: Build the single-container image (Python 3.14 + uv lockfile).
     cmds:
       - docker build -t ai-doc-review:local .
 

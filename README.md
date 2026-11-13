@@ -22,12 +22,12 @@ docker compose up -d --build
 # 打开 http://localhost:8000 ，默认账号 admin / admin123（首次登录后请修改）
 ```
 
-不使用 Docker 时：
+不使用 Docker 时（需要 Python 3.14 与 [uv](https://docs.astral.sh/uv/)）：
 
 ```bash
-task api-install           # 或手动 python -m venv .venv && pip install -r requirements.txt
+uv sync                    # 按 uv.lock 创建 .venv 并安装依赖
 task ui-install && task ui-build
-cd app/api && ../../.venv/bin/python -m uvicorn main:app --port 8000
+cd app/api && uv run --project ../.. uvicorn main:app --port 8000
 ```
 
 详见 [docs/local_deployment.md](./docs/local_deployment.md)（配置项、厂商切换、OCR、数据迁移与故障排查）。

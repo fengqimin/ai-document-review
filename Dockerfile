@@ -14,19 +14,23 @@ COPY app/ui/ ./
 RUN npm run build && cp -r /api/www /out-www
 
 # ---------------------------------------------------------------------------
-# Stage 2: Python runtime (FastAPI + review pipeline + built UI)
+# Stage 2: Python 3.14 runtime (uv-managed) + FastAPI + review pipeline + UI
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
-# Runtime deps (PyMuPDF ships manylinux wheels; no system libs needed).
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Dependencies first (cached layer): lockfile-driven, no resolver drift.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
 # Application code: API + shared models + review pipeline.
 COPY common/ ./common/

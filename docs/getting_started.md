@@ -4,18 +4,18 @@
 
 ## 环境要求
 
-- Python 3.12+（或 Docker）
+- **Python 3.14+**（依赖由 [uv](https://docs.astral.sh/uv/) 管理；`uv sync` 会自动准备合适的解释器）
+- [uv](https://docs.astral.sh/uv/) ≥ 0.13
 - Node.js 22（仅前端构建/开发需要）
 - [Task](https://taskfile.dev)（可选，也可手动执行等价命令）
 
 ## 开发环境搭建
 
 ```bash
-# 1. 安装依赖（venv + npm）
+# 1. 安装依赖（uv 按 uv.lock 建 .venv + npm）
 task install
 # 等价手动方式：
-#   python3 -m venv .venv
-#   .venv/bin/python -m pip install -r requirements.txt pytest
+#   uv sync                       # 读取 uv.lock，创建/更新 .venv
 #   cd app/ui && npm install
 
 # 2. 配置环境变量
@@ -30,6 +30,18 @@ task dev
 
 默认账号 `admin / admin123`（首次建库自动引导；`AUTH_DISABLED=true` 时免登录）。
 
+## 依赖管理（uv）
+
+`pyproject.toml` 是依赖的唯一真源，`uv.lock` 锁定完整解析结果，根 `requirements.txt` 由 uv 导出（供 pip/容器外的传统流程使用，勿手工编辑）。
+
+```bash
+uv add <pkg>              # 添加运行时依赖（自动更新 pyproject + lock）
+uv add --dev <pkg>        # 添加开发依赖
+task lock                 # 改完 pyproject 后刷新 lock 并重新导出 requirements.txt
+uv sync                   # 按 lock 同步环境（CI/新机器用 uv sync --frozen）
+uv run <cmd>              # 在项目环境内执行命令，无需手动 activate
+```
+
 ## 构建
 
 ```bash
@@ -42,7 +54,8 @@ task ui-build    # vite 构建产物输出到 app/api/www，由 API 静态托管
 task check-code  # compileall 编译检查
 task test        # pytest：流水线 21 例 + 后端 12 例
 # 单独运行：
-.venv/bin/python -m pytest flows/ai_doc_review/tests app/api/tests -q
+uv run pytest flows/ai_doc_review/tests app/api/tests -q
+# 指定单个文件：uv run pytest flows/ai_doc_review/tests/test_pipeline.py -q
 ```
 
 流水线测试使用 mock 的 OpenAI 兼容服务（本地 HTTP server），不消耗真实 token。

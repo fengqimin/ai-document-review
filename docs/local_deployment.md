@@ -21,10 +21,12 @@ task logs             # 跟踪日志
 
 ## 不用 Docker 运行
 
+需要 **Python 3.14+** 与 [uv](https://docs.astral.sh/uv/)：
+
 ```bash
-python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
-cd app/ui && npm install && npm run build && cd ../..   # UI 构建到 app/api/www
-cd app/api && ../../.venv/bin/python -m uvicorn main:app --port 8000
+uv sync                                                  # 按 uv.lock 建 .venv 并装依赖
+cd app/ui && npm install && npm run build && cd ../..    # UI 构建到 app/api/www
+cd app/api && uv run --project ../.. uvicorn main:app --port 8000
 ```
 
 ## 配置 LLM 端点（厂商中立）
@@ -73,7 +75,7 @@ cd app/api && ../../.venv/bin/python -m uvicorn main:app --port 8000
 ```dockerfile
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tesseract-ocr tesseract-ocr-chi-sim && rm -rf /var/lib/apt/lists/*
-RUN pip install pytesseract Pillow
+RUN uv pip install --system pytesseract Pillow
 ```
 
 并在 `.env` 设 `OCR_ENABLED=true`、`OCR_LANGUAGES=eng+chi_sim`。纯文本 PDF 不受影响。
@@ -102,7 +104,7 @@ RUN pip install pytesseract Pillow
 不消耗真实 token 的自检方式：
 
 ```bash
-.venv/bin/python -m pytest flows/ai_doc_review/tests app/api/tests -q
+uv run pytest -q
 # 33 例覆盖：抽取/包围盒、去重/REMOVE 过滤、mock OpenAI 服务的请求体与
 # schema 降级/退避、端到端分块流、认证/上传/下载/路径穿越防御
 ```

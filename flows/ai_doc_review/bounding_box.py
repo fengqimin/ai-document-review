@@ -7,7 +7,7 @@ import logging
 from common.models import CombinedIssue
 from flows.ai_doc_review.document import ExtractedDocument, Word
 from shapely import Polygon, union_all
-from fitz import Rect
+from pymupdf import Rect
 
 
 def create_bounding_box(issue_words: list[Word], page_height: float) -> list[float]:

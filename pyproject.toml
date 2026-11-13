@@ -1,17 +1,39 @@
 [project]
 name = "ai-document-review"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local-first AI document review: FastAPI + React + OpenAI-compatible LLM"
 readme = "README.md"
-authors = [
-    { name = "fengqimin", email = "fengqimin@msn.com" }
-]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    # --- API (FastAPI) ---
+    "fastapi[standard]==0.162.5",
+    "pydantic==2.14.3",
+    "pydantic-settings==2.16.2",
+    "pyjwt==2.15.1",
+    "uvicorn[standard]==0.54.0",
+    "python-multipart==0.0.33",
+    # --- Review pipeline ---
+    "openai==3.49.0",
+    "pymupdf==2.1.0",
+    "shapely==2.2.0",
+    "more-itertools==11.2.1",
+    "jinja2==3.1.6",
+]
 
-[project.scripts]
-ai-document-review = "ai_document_review:main"
+# Optional OCR (default off; requires the tesseract binary at runtime).
+[project.optional-dependencies]
+ocr = [
+    "pytesseract>=0.3.13",
+    "pillow>=12.0.0",
+]
 
-[build-system]
-requires = ["uv_build>=0.13.8,<0.14.0"]
-build-backend = "uv_build"
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["flows/ai_doc_review/tests", "app/api/tests"]

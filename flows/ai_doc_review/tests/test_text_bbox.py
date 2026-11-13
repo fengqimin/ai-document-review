@@ -2,7 +2,7 @@
 produce DI-shaped structures whose paragraph offsets hit word spans, and
 add_bounding_box must produce quadpoints."""
 
-import fitz
+import pymupdf as fitz
 import pytest
 from pathlib import Path
 

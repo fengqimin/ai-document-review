@@ -6,7 +6,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import fitz
+import pymupdf as fitz
 import pytest
 
 from common.models import AllCombinedIssues

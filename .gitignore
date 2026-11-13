@@ -178,3 +178,6 @@ certs/
 
 # Local deployment runtime data (SQLite, PDFs, logs)
 data/
+
+# uv (lockfile is committed; local caches are not)
+.uv/
