@@ -2,6 +2,9 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Repository root (app/api/config/config.py -> app/api -> app -> repo)
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 class Settings(BaseSettings):
     """Local deployment settings (replaces the Azure App Service configuration).
@@ -57,20 +60,38 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        # Resolve .env from the repo root so the app behaves the same whether
+        # uvicorn is started from the repo root, from app/api (task dev) or
+        # from /app/app/api inside the container. A .env in the CWD still wins.
+        env_file=(REPO_ROOT / ".env", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # ------------------------------------------------------------------ paths
     @property
+    def data_root(self) -> Path:
+        """Absolute data directory.
+
+        A relative DATA_DIR resolves against the repo root rather than the
+        process CWD: otherwise the same config would write to app/api/data or
+        /app/app/api/data depending on how the process was started.
+        """
+        path = Path(self.data_dir).expanduser()
+        return path if path.is_absolute() else REPO_ROOT / path
+
+    @property
     def database_path(self) -> Path:
-        return Path(self.data_dir) / "review.db"
+        return self.data_root / "review.db"
 
     @property
     def documents_dir(self) -> Path:
-        return Path(self.data_dir) / "documents"
+        return self.data_root / "documents"
 
     @property
     def log_file(self) -> Path:
-        return Path(self.data_dir) / "logs" / "app.log"
+        return self.data_root / "logs" / "app.log"
 
     # ------------------------------------------------------------------ misc
     @property

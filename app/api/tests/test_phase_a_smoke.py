@@ -11,9 +11,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Isolated data dir must be set before config is imported.
+# Isolated data dir must be set before config is imported. LLM_* is blanked on
+# purpose: a developer's real .env must never leak into these assertions.
 _tmp = tempfile.mkdtemp(prefix="adr-test-")
-os.environ["DATA_DIR"] = _tmp
+os.environ.update(
+    DATA_DIR=_tmp,
+    AUTH_DISABLED="false",
+    ADMIN_USERNAME="admin",
+    ADMIN_PASSWORD="admin123",
+    JWT_SECRET="test-secret-not-for-production",
+    LLM_BASE_URL="",
+    LLM_API_KEY="",
+    LLM_MODEL="",
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT))  # `common` package

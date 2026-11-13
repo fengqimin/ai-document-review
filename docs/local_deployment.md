@@ -14,6 +14,8 @@ docker compose up -d --build
 
 数据备份：直接拷贝 `./data/` 目录即可（含 `review.db`、`documents/`、`logs/`）。
 
+镜像为多阶段构建（node 阶段只产出 `www/` 静态文件，不进最终镜像），构建后约 **834MB**；`uv` 与 `npm` 的下载缓存使用 BuildKit 缓存挂载，不写入镜像层。compose 显式把 `DATA_DIR` 指到挂载点 `/app/data`——相对路径会按仓库根解析，不随工作目录漂移。
+
 ```bash
 docker compose down   # 停止，data/ 保留
 task logs             # 跟踪日志

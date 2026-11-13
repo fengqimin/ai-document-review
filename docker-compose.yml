@@ -10,6 +10,11 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # Must point at the mounted volume. A relative DATA_DIR from .env would
+      # resolve against the container CWD (/app/app/api) and silently write
+      # state inside the container layer, losing it on recreation.
+      DATA_DIR: /app/data
     volumes:
       # All state: review.db (SQLite), documents/ (PDFs), logs/
       - ./data:/app/data
