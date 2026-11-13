@@ -30,7 +30,9 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
     """State-driven stub: state dict controls behaviour per test."""
 
     state = {
-        "mode": "ok",                # ok | reject_schema | flaky_429 | bad_json_once | echo_request
+        # ok | reject_schema | flaky_429 | bad_json_once | echo_request |
+        # bare_array | fenced_array | renamed_key
+        "mode": "ok",
         "requests": [],
         "last_body": None,
         "reject_schema_seen": False,
@@ -65,6 +67,13 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
             content = "this is definitely not json at all"
         if self.state["mode"] == "echo_request":
             content = json.dumps({"echo": body})
+        # Real-world interop: endpoints that ignore the requested envelope.
+        if self.state["mode"] == "bare_array":
+            content = json.dumps(VALID_ISSUES["issues"])
+        if self.state["mode"] == "fenced_array":
+            content = "```json\n" + json.dumps(VALID_ISSUES["issues"]) + "\n```"
+        if self.state["mode"] == "renamed_key":
+            content = json.dumps({"flagged": VALID_ISSUES["issues"]})
 
         self._send(200, {
             "id": "chatcmpl-mock", "object": "chat.completion", "model": body.get("model"),
@@ -182,6 +191,24 @@ def test_invalid_json_retried_with_correction(mock_server, reset_state):
     roles = [m["role"] for m in MockOpenAIHandler.state["last_body"]["messages"]]
     assert roles == ["system", "user", "assistant", "user"]  # correction appended
     assert "not valid JSON" in MockOpenAIHandler.state["last_body"]["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize("mode", ["bare_array", "fenced_array", "renamed_key"])
+def test_output_without_envelope_is_coerced(mock_server, reset_state, mode):
+    """Endpoints that answer with a bare array (or a renamed key), or wrap the
+    JSON in markdown fences, must not cost a validation retry — a real
+    DeepSeek-compatible endpoint failed every shot this way."""
+    from flows.ai_doc_review.llm import LLMClient
+
+    MockOpenAIHandler.state["mode"] = mode
+    config = next(make_config(mock_server, LLM_MAX_RETRIES=0))
+    client = LLMClient(config)
+
+    result = client.complete_json("s", "u", AllSingleShotIssues)
+    assert len(result.issues) == 1
+    assert result.issues[0].text == "recieve"
+    # Coerced on the first response: no corrective round-trip.
+    assert len(MockOpenAIHandler.state["requests"]) == 1
 
 
 def test_hard_json_failure_raises_llm_error(mock_server, reset_state):

@@ -45,6 +45,16 @@ cd app/api && uv run --project ../.. uvicorn main:app --port 8000
 
 切换厂商只改 `.env` 三行，代码与提示词不动。
 
+### 输出格式兼容性
+
+不同厂商对结构化输出的实现差异很大，客户端做了三层兜底，实测能覆盖常见情况：
+
+1. **`json_schema` 优先**：端点拒绝该字段时自动降级为 `json_object` + 在提示里注入 JSON Schema，只降级一次，后续调用沿用。
+2. **信封容错**：不少端点（含部分 DeepSeek 兼容网关）无视请求的 `{"issues": [...]}` 结构，直接返回裸数组 `[{...}]`，或用 `items` / `data` 之类的键名，或在 JSON 外包一层 ```json 围栏。这些都自动纠正，不消耗重试次数。
+3. **机械字段容错**：`page_num` / `bounding_box` / `comment_id` 由流水线自己计算（包围盒与去重阶段），模型漏填或填 `null` 时自动补默认值，不会因为一个占位字段丢掉整条有效发现。
+
+真正缺语义字段（`text` / `explanation` / `suggested_fix` / `location.para_index`）时仍会重试并报错，不会静默吞掉。
+
 ### 数据出域与合规
 
 - 审阅时**抽取出的文本分块**会发往上述端点——这是唯一出域点。
@@ -97,6 +107,8 @@ RUN uv pip install --system pytesseract Pillow
 | 审阅 SSE 返回 error：LLM not configured | 同上 |
 | 429 / rate limit | 调低 `LLM_MAX_WORKERS`、`LLM_SHOTS`，或确认厂商配额 |
 | JSON 解析失败频繁 | 厂商对 `json_schema` 支持差时设 `LLM_STRICT_JSON=false`（自动走 `json_object` + schema 注入） |
+| 某个维度（如 Definitive Language）一条结果都没有 | 查日志 `Agent shot failed for <维度>`：该维度的所有 shot 都没通过校验。日志里会打印具体缺失字段 |
+| 审阅很慢（3 段文档数分钟） | 单次调用耗时由厂商决定；`LLM_SHOTS=5` × 维度数即请求数。调低 `LLM_SHOTS` 或提高 `LLM_MAX_WORKERS`（注意限流） |
 | 高亮缺失但 issue 正常 | 段落切分与原 Document Intelligence 存在差异属预期行为，审阅不中断 |
 | 登录后立即 401 | `JWT_SECRET` 与签发时不一致（改过未重启）；清 sessionStorage 重新登录 |
 | 容器起不来 | `docker compose logs app`；确认 8000 端口未被占用 |

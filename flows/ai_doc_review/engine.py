@@ -13,13 +13,18 @@ from flows.ai_doc_review.text import extract_document, get_text_chunks
 logging = logging.getLogger(__name__)
 
 
-def stream_review(pdf_path: str, paragraphs_per_chunk: int | None = None) -> Generator[str, None, None]:
+def stream_review(
+    pdf_path: str,
+    paragraphs_per_chunk: int | None = None,
+    config: PipelineConfig | None = None,
+) -> Generator[str, None, None]:
     """Stream review results for a local PDF file.
 
     Yields one AllCombinedIssues JSON string per paragraph chunk, matching the
-    chunk contract previously produced by process_streaming.py.
+    chunk contract previously produced by process_streaming.py. `config` is
+    injectable for tests (see PipelineConfig(_env_file=None)).
     """
-    config = PipelineConfig()
+    config = config or PipelineConfig()
     if not config.llm_configured:
         raise RuntimeError(
             "LLM endpoint is not configured. Set LLM_BASE_URL, LLM_API_KEY and "

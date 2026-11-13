@@ -138,6 +138,7 @@ def test_stream_review_end_to_end(env):
 
 
 def test_stream_review_requires_llm_config(tmp_path):
+    from flows.ai_doc_review.config import PipelineConfig
     from flows.ai_doc_review.engine import stream_review
 
     pdf = tmp_path / "empty.pdf"
@@ -146,13 +147,7 @@ def test_stream_review_requires_llm_config(tmp_path):
     doc.save(str(pdf))
     doc.close()
 
-    old = {k: os.environ.get(k) for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")}
-    for k in old:
-        os.environ.pop(k, None)
-    try:
-        with pytest.raises(RuntimeError, match="LLM endpoint is not configured"):
-            list(stream_review(str(pdf)))
-    finally:
-        for k, v in old.items():
-            if v is not None:
-                os.environ[k] = v
+    # _env_file=None keeps a developer's real repo .env out of the assertion.
+    cfg = PipelineConfig(_env_file=None, llm_base_url="", llm_api_key="", llm_model="")
+    with pytest.raises(RuntimeError, match="LLM endpoint is not configured"):
+        list(stream_review(str(pdf), config=cfg))

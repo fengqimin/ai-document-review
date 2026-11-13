@@ -14,11 +14,18 @@ import json
 import logging
 import random
 import time
-from typing import Type, TypeVar
+from typing import Type, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _is_list_annotation(annotation) -> bool:
+    """True for list[...] (possibly wrapped in Optional/Union)."""
+    if get_origin(annotation) is list:
+        return True
+    return any(_is_list_annotation(arg) for arg in get_args(annotation))
 
 logging = logging.getLogger(__name__)
 
@@ -67,6 +74,17 @@ class LLMClient:
             f"schema:\n{json.dumps(response_model.model_json_schema())}"
         )
 
+    @staticmethod
+    def _envelope_hint(response_model: Type[T]) -> str:
+        """Concrete top-level shape, e.g. '{"issues": [...]}'."""
+        list_fields = [
+            name for name, field in response_model.model_fields.items()
+            if _is_list_annotation(field.annotation)
+        ]
+        if len(list_fields) == 1:
+            return '{"%s": [...]}' % list_fields[0]
+        return '{"<field>": ...}'
+
     def _is_transient(self, exc: Exception) -> bool:
         status = getattr(exc, "status_code", None)
         if status in _TRANSIENT_STATUS_CODES:
@@ -95,20 +113,61 @@ class LLMClient:
                 delay = min(delay * 2, 30)
         raise last_exc  # pragma: no cover
 
-    def _extract_json(self, content: str) -> dict:
-        """Parse JSON from model output, tolerating markdown fences."""
+    def _extract_json(self, content: str):
+        """Parse JSON from model output, tolerating markdown fences.
+
+        Returns whatever JSON value the model produced (object or array): some
+        OpenAI-compatible endpoints ignore the requested envelope and answer
+        with a bare array, which `_coerce_to_model` then wraps.
+        """
         text = content.strip()
         if text.startswith("```"):
             text = text.strip("`")
             if text.startswith("json"):
                 text = text[4:]
+            text = text.strip()
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            start, end = text.find("{"), text.rfind("}")
-            if start >= 0 and end > start:
-                return json.loads(text[start:end + 1])
-            raise
+            pass
+        # Fall back to the first balanced object/array embedded in prose.
+        starts = [(text.find("{" ), "{", "}"), (text.find("["), "[", "]")]
+        candidates = [c for c in starts if c[0] >= 0]
+        if not candidates:
+            raise ValueError(f"No JSON found in model output: {text[:200]!r}")
+        pos, opener, closer = min(candidates, key=lambda c: c[0])
+        end = text.rfind(closer)
+        if end <= pos:
+            raise ValueError(f"Unbalanced JSON in model output: {text[:200]!r}")
+        return json.loads(text[pos:end + 1])
+
+    @staticmethod
+    def _coerce_to_model(response_model: Type[T], raw):
+        """Wrap a bare array into the single-list-field envelope when needed.
+
+        Many "OpenAI-compatible" endpoints return `[{...}]` even when asked for
+        `{"issues": [{...}]}`. Without this, every shot fails validation, and a
+        whole review dimension silently degrades.
+        """
+        if isinstance(raw, dict):
+            # Occasionally the envelope key is renamed ("items", "data", ...).
+            list_fields = [
+                name for name, field in response_model.model_fields.items()
+                if _is_list_annotation(field.annotation)
+            ]
+            if len(list_fields) == 1 and list_fields[0] not in raw:
+                for key, value in raw.items():
+                    if isinstance(value, list):
+                        return {list_fields[0]: value}
+            return raw
+        if isinstance(raw, list):
+            list_fields = [
+                name for name, field in response_model.model_fields.items()
+                if _is_list_annotation(field.annotation)
+            ]
+            if len(list_fields) == 1:
+                return {list_fields[0]: raw}
+        return raw
 
     # ------------------------------------------------------------- public API
     def complete_json(
@@ -176,7 +235,9 @@ class LLMClient:
 
             content = response.choices[0].message.content or ""
             try:
-                return response_model.model_validate(self._extract_json(content))
+                return response_model.model_validate(
+                    self._coerce_to_model(response_model, self._extract_json(content))
+                )
             except Exception as exc:
                 if validation_attempt == self.config.llm_max_retries:
                     raise LLMError(
@@ -191,7 +252,9 @@ class LLMClient:
                 messages.append({
                     "role": "user",
                     "content": "Your previous response was not valid JSON for the required "
-                               "schema. Respond again with ONLY a valid JSON object.",
+                               f"schema. Respond again with ONLY a JSON object shaped like "
+                               f"{self._envelope_hint(response_model)} — the top level must "
+                               "be an object, not an array, and without markdown fences.",
                 })
 
         raise LLMError(f"Unreachable: {response_model.__name__}")  # pragma: no cover

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from enum import Enum
 from typing import Optional
 
@@ -22,6 +22,31 @@ class SingleShotIssue(BaseModel):
     explanation: str
     suggested_fix: str
     comment_id: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_mechanical_fields(cls, data):
+        """Tolerate omitted mechanical fields.
+
+        page_num / bounding_box / comment_id are computed by the pipeline
+        (add_bounding_box, dedup) and carry no meaning from the model, yet large
+        models routinely leave them out. Rejecting the whole finding for a
+        missing placeholder discards a valid issue and burns the retry budget.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if not isinstance(data.get("comment_id"), str):
+            data["comment_id"] = ""
+        location = data.get("location")
+        if isinstance(location, dict):
+            location = dict(location)
+            if not isinstance(location.get("page_num"), int):
+                location["page_num"] = 0
+            if not isinstance(location.get("bounding_box"), list):
+                location["bounding_box"] = []
+            data["location"] = location
+        return data
 
 
 class ConsolidatorIssue(BaseModel):
