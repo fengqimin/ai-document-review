@@ -83,6 +83,8 @@ cd app/api && uv run --project ../.. uvicorn main:app --port 8000
 
 完整列表见 `.env.example`。
 
+> 写 `.env` 时注释必须独占一行。`docker run --env-file` 不剥离行内注释，`LLM_MAX_WORKERS=8  # 说明` 会被当作字符串 `8  # 说明` 传给进程，整数配置解析失败、容器直接启动不起来。
+
 ## 扫描件 OCR（可选）
 
 默认镜像不含 Tesseract。需要处理扫描版 PDF 时，基于根 `Dockerfile` 追加：
