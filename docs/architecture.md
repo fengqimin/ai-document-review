@@ -46,13 +46,15 @@ PDF ──► text.py（PyMuPDF 抽取 + 可选 OCR）
         ├─ pages[].words[]（词级 bbox，pt÷72 转英寸）
         └─ get_text_chunks() 按 PARAGRAPHS_PER_CHUNK 切块
      ──► pipeline.py
-        ├─ 每 chunk × LLM_SHOTS 并发调用 agent.jinja2（5-shot 检出）
+        ├─ 每 chunk：2 维度 × LLM_SHOTS 个 shot 一次性 fan-out（5-shot 检出）
+        ├─ 两个维度的 consolidator 并发执行
         ├─ 按 (type, source_sentence) 去重，分配 comment_id
         ├─ consolidator.jinja2 整合（评分 + KEEP/REMOVE 判定）
         ├─ 过滤 REMOVE，add_bounding_box() 回填坐标
         └─ 按 chunk 产出 FlowOutputChunk → SSE
 ```
 
+- 并发预算：`LLMClient` 内的信号量把在途请求封顶在 `LLM_MAX_WORKERS`（所有维度、所有在跑分块共用）；分块侧 `CHUNK_MAX_WORKERS` 做有界预取，SSE 仍按文档顺序推送。
 - 单 shot 或 consolidator 失败只降级当前 chunk，不中断整次审阅。
 - 429/5xx/超时指数退避重试与 JSON 校验重试分开计数；记录 token usage 便于控成本。
 - 优先 `response_format=json_schema` 严格结构化输出；端点不支持时自动降级 `json_object` 并将 schema 注入提示词。

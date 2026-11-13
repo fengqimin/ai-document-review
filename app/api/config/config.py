@@ -44,10 +44,14 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_strict_json: bool = True
     llm_shots: int = 5
-    llm_max_workers: int = 2
+    # Mirrors PipelineConfig: global cap on concurrent LLM requests per review,
+    # and how many chunks are kept in flight (output order is unchanged).
+    llm_max_workers: int = 8
+    chunk_max_workers: int = 2
     llm_max_retries: int = 2
     llm_timeout_seconds: int = 300
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 8192
+    consolidator_batch_size: int = 10
     paragraphs_per_chunk: int = 16
 
     # OCR for scanned PDFs (default off)

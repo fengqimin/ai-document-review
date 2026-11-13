@@ -185,7 +185,7 @@ text chunk (每 16 段，带 [i] 前缀)
 
 **面向大模型 API 的调用策略（v2 新增）**：
 
-- **限流**：云 API 有 RPM / TPM 配额，`LLM_MAX_WORKERS` 默认调小为 2；对 429 / 5xx / 超时做指数退避 + jitter 重试，与「JSON 校验重试」分开计数，避免把限流误判为模型输出错误。
+- **限流**：云 API 有 RPM / TPM 配额，`LLM_MAX_WORKERS` 作为单次审阅的全局并发上限（默认 8，所有维度与在跑分块共用同一个信号量）；对 429 / 5xx / 超时做指数退避 + jitter 重试，与「JSON 校验重试」分开计数，避免把限流误判为模型输出错误。
 - **成本**：每次 chunk 触发 5 次 agent + 1 次 consolidator，按 token 计费。记录每次响应的 `usage`（prompt / completion tokens）与累计估算，`LLM_SHOTS` 与 `PARAGRAPHS_PER_CHUNK` 可调以控制成本；`LLM_MAX_TOKENS` 限制单次输出。
 - **超时**：`LLM_TIMEOUT_SECONDS`（默认 300s）覆盖单次请求；单 chunk 失败隔离，不影响后续分块的流式推送。
 - **可替换性**：客户端只依赖 `openai` SDK 的 `base_url` / `api_key` / `model` 三个参数，切换云厂商或切到内网 vLLM 无需改代码。
@@ -193,6 +193,7 @@ text chunk (每 16 段，带 [i] 前缀)
 ### 4.3 流式与并发
 
 - 流水线暴露同步生成器 `stream_review(pdf_path, config) -> Generator[str]`。
+- 并发模型：两个审阅维度 × `LLM_SHOTS` 个 shot 一次性 fan-out 到线程池，`LLMClient` 里的信号量把实际在途请求封顶在 `LLM_MAX_WORKERS`；分块侧做 `CHUNK_MAX_WORKERS` 有界预取，但按文档顺序 flush。
 - API 侧用 `await asyncio.to_thread(next, gen, _SENTINEL)` 逐块取值，包装成 async generator 喂给 `StreamingResponse`，**不阻塞事件循环**。
 - SQLite 同步调用同样用 `asyncio.to_thread` 包装，顺带解决 `docs/wiki/08` 记录的 P1-03（async 路由内执行同步 SDK）。
 - 移除 `aml_client.py` 中的全局 `ssl._create_default_https_context` 篡改（安全问题一并消失）。
@@ -332,10 +333,12 @@ ai-document-review/
 | **`LLM_API_KEY`** | 空（**部署必填**） | 不进版本库、不写日志；为空时健康检查为 degraded |
 | **`LLM_MODEL`** | `gpt-4o`（示例，**部署必填**） | 按所选服务填写其支持的大模型名 |
 | `LLM_STRICT_JSON` | `true` | 优先 `json_schema`；端点不支持时自动降级 `json_object` |
-| `LLM_SHOTS` / `LLM_MAX_WORKERS` | `5` / `2` | 多 shot 数；云 API 按限流调小并发 |
+| `LLM_SHOTS` / `LLM_MAX_WORKERS` | `5` / `8` | 多 shot 数；全局并发上限，按厂商限流调整 |
+| `CHUNK_MAX_WORKERS` | `2` | 同时在跑的分块数（有界预取，SSE 输出顺序不变） |
 | `LLM_MAX_RETRIES` | `2` | JSON 校验失败重试；429/5xx 另行指数退避重试 |
 | `LLM_TIMEOUT_SECONDS` | `300` | 单次请求超时 |
-| `LLM_MAX_TOKENS` | `4096` | 单次输出上限，控成本 |
+| `LLM_MAX_TOKENS` | `8192` | 单次输出上限；4096 在实测中把 5 条 verdict 的 JSON 截断 |
+| `CONSOLIDATOR_BATCH_SIZE` | `10` | 每次 consolidator 处理的 issue 数（每条 verdict 约 400 completion tokens） |
 | `PARAGRAPHS_PER_CHUNK` | `16` | 分块大小，影响流式粒度与请求次数 |
 | `OCR_ENABLED` / `OCR_LANGUAGES` | `false` / `eng` | 扫描件 OCR，默认关闭 |
 | `MAX_UPLOAD_MB` | `50` | 上传上限 |

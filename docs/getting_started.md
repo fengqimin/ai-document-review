@@ -76,7 +76,7 @@ flows/ai_doc_review/
   text.py        PyMuPDF 抽取（DI 同形结构）
   ocr.py         可选 Tesseract OCR
   llm.py         OpenAI 兼容客户端（schema 降级/退避/usage）
-  pipeline.py    5-shot 检出 → 去重 → consolidator → REMOVE 过滤
+  pipeline.py    5-shot 并行检出（2 维度同时）→ 去重 → consolidator → REMOVE 过滤
   engine.py      stream_review() 同步生成器入口
   prompts/       jinja2 提示词（审阅规则的唯一来源）
   tests/         流水线测试

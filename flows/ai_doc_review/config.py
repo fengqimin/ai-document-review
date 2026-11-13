@@ -33,10 +33,18 @@ class PipelineConfig(BaseSettings):
     llm_model: str = ""
     llm_strict_json: bool = True
     llm_shots: int = 5
-    llm_max_workers: int = 2
+    # Global cap on concurrent LLM HTTP requests for one review run. Shots of
+    # both dimensions and all in-flight chunks share this budget.
+    llm_max_workers: int = 8
+    # Chunks kept in flight (bounded look-ahead); output order is unchanged.
+    chunk_max_workers: int = 2
     llm_max_retries: int = 2
     llm_timeout_seconds: int = 300
-    llm_max_tokens: int = 4096
+    # A verdict is verbose (reason + score + action): ~400 completion tokens
+    # per issue. 4096 truncated a 5-issue consolidator call mid-JSON on a real
+    # endpoint, so the budget is doubled and consolidator input is batched.
+    llm_max_tokens: int = 8192
+    consolidator_batch_size: int = 10
 
     # Transient (429/5xx/timeout) retries: exponential backoff, kept separate
     # from JSON-validation retries (llm_max_retries).

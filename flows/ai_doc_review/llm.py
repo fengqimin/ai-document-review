@@ -8,11 +8,15 @@ AzureOpenAIConnection).
   fallback to json_object + schema injection when the endpoint rejects it.
 - Retries: transient errors (429/5xx/timeout/connection) use exponential
   backoff with jitter, counted separately from JSON-validation retries.
-- Usage: token counts are logged per call (never prompt bodies or keys)."""
+- Concurrency: one client per review run owns a semaphore capping in-flight
+  requests at LLM_MAX_WORKERS, shared by every dimension and chunk.
+- Usage: token counts and latency are logged per call (never prompt bodies or
+  keys)."""
 
 import json
 import logging
 import random
+import threading
 import time
 from typing import Type, TypeVar, get_args, get_origin
 
@@ -49,6 +53,11 @@ class LLMClient:
             max_retries=0,  # SDK retries disabled; we own the backoff policy
         )
         self._schema_fallback = False  # flips to True after a json_schema rejection
+        # One client per review run: this semaphore is the hard cap on
+        # concurrent requests, shared by every dimension and in-flight chunk.
+        self._request_slots = threading.BoundedSemaphore(max(1, int(config.llm_max_workers or 1)))
+        self.last_call_seconds = 0.0
+        self._usage_lock = threading.Lock()
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
 
@@ -93,13 +102,20 @@ class LLMClient:
         return name in ("APIConnectionError", "APITimeoutError", "Timeout", "ConnectionError")
 
     def _call_with_backoff(self, **kwargs):
-        """Chat completion with exponential backoff + jitter on transient errors."""
+        """Chat completion with exponential backoff + jitter on transient errors.
+
+        The request slot is held only for the HTTP call itself, never across a
+        backoff sleep, so a rate-limited run does not stall the whole pool."""
         attempts = self.config.llm_transient_retries + 1
         delay = 1.0
         last_exc = None
         for attempt in range(attempts):
             try:
-                return self.client.chat.completions.create(**kwargs)
+                with self._request_slots:
+                    started = time.monotonic()
+                    response = self.client.chat.completions.create(**kwargs)
+                self.last_call_seconds = time.monotonic() - started
+                return response
             except Exception as exc:
                 if not self._is_transient(exc) or attempt == attempts - 1:
                     raise
@@ -226,14 +242,22 @@ class LLMClient:
 
             usage = getattr(response, "usage", None)
             if usage:
-                self.total_prompt_tokens += usage.prompt_tokens or 0
-                self.total_completion_tokens += usage.completion_tokens or 0
+                with self._usage_lock:
+                    self.total_prompt_tokens += usage.prompt_tokens or 0
+                    self.total_completion_tokens += usage.completion_tokens or 0
                 logging.info(
-                    f"LLM call ok ({response_model.__name__}): "
+                    f"LLM call ok ({response_model.__name__}) in "
+                    f"{self.last_call_seconds:.1f}s: "
                     f"prompt={usage.prompt_tokens} completion={usage.completion_tokens} tokens"
+                )
+            else:
+                logging.info(
+                    f"LLM call ok ({response_model.__name__}) in "
+                    f"{self.last_call_seconds:.1f}s (no usage reported)"
                 )
 
             content = response.choices[0].message.content or ""
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
             try:
                 return response_model.model_validate(
                     self._coerce_to_model(response_model, self._extract_json(content))
@@ -242,11 +266,17 @@ class LLMClient:
                 if validation_attempt == self.config.llm_max_retries:
                     raise LLMError(
                         f"Model output failed {response_model.__name__} validation "
-                        f"after {self.config.llm_max_retries + 1} attempts: {exc}"
+                        f"after {self.config.llm_max_retries + 1} attempts "
+                        f"(finish_reason={finish_reason}): {exc}"
                     ) from exc
+                # finish_reason=length means the JSON was cut off by
+                # LLM_MAX_TOKENS, not that the model is ignoring the schema.
+                hint = " (output truncated: raise LLM_MAX_TOKENS or lower the batch size)" \
+                    if finish_reason == "length" else ""
                 logging.warning(
-                    f"Invalid JSON for {response_model.__name__} "
-                    f"(validation retry {validation_attempt + 1}/{self.config.llm_max_retries})"
+                    f"Invalid JSON for {response_model.__name__}{hint} "
+                    f"(finish_reason={finish_reason}, validation retry "
+                    f"{validation_attempt + 1}/{self.config.llm_max_retries})"
                 )
                 messages.append({"role": "assistant", "content": content})
                 messages.append({

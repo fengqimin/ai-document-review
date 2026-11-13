@@ -2,18 +2,26 @@
 prompt assets (prompts/{grammar,definitive_language}/*.jinja2 are untouched):
 
   text chunk ([i]-prefixed paragraphs)
-    -> N concurrent agent shots per issue type (temperature 1.0) -> AllSingleShotIssues
-    -> dedup by (type, source_sentence) + comment_id        (aggregate step)
-    -> 1 consolidator call -> AllConsolidatorIssues (score / KEEP|REMOVE)
+    -> 2 dimensions x N shots fanned out into one pool (temperature 1.0)
+       -> AllSingleShotIssues
+    -> per dimension: dedup by (type, source_sentence) + comment_id (aggregate)
+    -> per dimension: 1 consolidator call -> AllConsolidatorIssues
+       (the two dimensions run concurrently, not back to back)
     -> merge on comment_id, drop suggested_action == REMOVE  (merge step)
     -> add_bounding_box() per issue (best effort, failures are logged)
     -> yield AllCombinedIssues.model_dump_json() per chunk
+
+Chunks themselves are pipelined with a bounded look-ahead (CHUNK_MAX_WORKERS)
+and still emitted in document order.
 """
 
 import logging
 import random
 import string
+import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from typing import Generator, List
 
@@ -68,36 +76,59 @@ def generate_random_string(length: int = 6) -> str:
     return "".join(random.choice(letters) for _ in range(length))
 
 
-def run_agent_shots(
-    llm: LLMClient, issue_type: IssueType, text: str, config: PipelineConfig
-) -> List[SingleShotIssue]:
-    """Run N concurrent agent shots for one issue type; failed shots are
-    logged and dropped (single-shot isolation, one bad shot never kills the
-    chunk)."""
-    paths = AGENT_PROMPTS[issue_type]
-    guidelines = render_prompt(paths["guidelines"])
-    system_prompt = render_prompt(paths["agent"], guidelines=guidelines)
-
-    def one_shot(_: int) -> AllSingleShotIssues:
-        return llm.complete_json(
-            system_prompt=system_prompt,
-            user_prompt=text,
-            response_model=AllSingleShotIssues,
-            temperature=1.0,
+@lru_cache(maxsize=1)
+def _system_prompts() -> dict:
+    """(agent, consolidator) system prompts per dimension, rendered once."""
+    return {
+        issue_type: (
+            render_prompt(paths["agent"], guidelines=render_prompt(paths["guidelines"])),
+            render_prompt(paths["consolidator"], guidelines=render_prompt(paths["guidelines"])),
         )
+        for issue_type, paths in AGENT_PROMPTS.items()
+    }
 
-    shots: List[SingleShotIssue] = []
-    with ThreadPoolExecutor(max_workers=max(1, config.llm_max_workers)) as pool:
-        futures = [pool.submit(one_shot, i) for i in range(max(1, config.llm_shots))]
-        for future in futures:
+
+def run_all_shots(llm: LLMClient, text: str, config: PipelineConfig) -> dict:
+    """Fan every (dimension, shot) pair out into one pool; return issues per
+    dimension. A failed shot is logged and dropped (one bad shot never kills
+    the chunk).
+
+    Both dimensions used to run back to back, each with its own pool sized by
+    LLM_MAX_WORKERS: 5 shots at 2 workers meant 3 sequential waves per
+    dimension, i.e. ~4 minutes for one 3-paragraph chunk. Submitting all shots
+    at once keeps the provider busy while the real request cap stays the LLM
+    client's semaphore (also LLM_MAX_WORKERS, but interpreted globally).
+    """
+    prompts = _system_prompts()
+    shots_per_type = max(1, config.llm_shots)
+    jobs = [(issue_type, i) for issue_type in AGENT_PROMPTS for i in range(shots_per_type)]
+    results: dict = {issue_type: [] for issue_type in AGENT_PROMPTS}
+    started = time.monotonic()
+
+    with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="shot") as pool:
+        futures = {
+            pool.submit(
+                llm.complete_json,
+                system_prompt=prompts[issue_type][0],
+                user_prompt=text,
+                response_model=AllSingleShotIssues,
+                temperature=1.0,
+            ): issue_type
+            for issue_type, _ in jobs
+        }
+        for future, issue_type in futures.items():
             try:
-                shots.extend(future.result().issues)
+                for issue in future.result().issues:
+                    issue.type = issue_type
+                    results[issue_type].append(issue)
             except Exception as exc:
                 logging.error(f"Agent shot failed for {issue_type.value}: {exc}")
 
-    for issue in shots:
-        issue.type = issue_type
-    return shots
+    logging.info(
+        f"Agent shots: {len(jobs)} calls in {time.monotonic() - started:.1f}s -> "
+        + ", ".join(f"{t.value}={len(v)} issues" for t, v in results.items())
+    )
+    return results
 
 
 def aggregate_shots(shots: List[SingleShotIssue]) -> List[SingleShotIssue]:
@@ -125,9 +156,7 @@ def run_consolidator(
     unfiltered agent issues rather than being lost)."""
     if not aggregated:
         return []
-    paths = AGENT_PROMPTS[issue_type]
-    guidelines = render_prompt(paths["guidelines"])
-    system_prompt = render_prompt(paths["consolidator"], guidelines=guidelines)
+    system_prompt = _system_prompts()[issue_type][1]
     try:
         result = llm.complete_json(
             system_prompt=system_prompt,
@@ -139,6 +168,40 @@ def run_consolidator(
     except Exception as exc:
         logging.error(f"Consolidator failed for {issue_type.value}: {exc}; keeping unfiltered issues")
         return []
+
+
+def run_consolidators(llm: LLMClient, aggregated: dict, config: PipelineConfig) -> dict:
+    """One consolidator call per non-empty dimension, run concurrently.
+
+    Input is also batched: a verdict costs ~400 completion tokens, so a large
+    chunk can push one consolidator call past LLM_MAX_TOKENS and truncate the
+    JSON mid-object (observed with 5 issues at a 4096 budget). Batching is
+    sound because `aggregate_shots` keeps exactly one issue per source
+    sentence, so no verdict depends on issues in another batch.
+    """
+    batch_size = max(1, config.consolidator_batch_size)
+    jobs = [
+        (issue_type, issues[start:start + batch_size])
+        for issue_type, issues in aggregated.items()
+        for start in range(0, len(issues), batch_size)
+    ]
+    verdicts: dict = {issue_type: [] for issue_type in aggregated}
+    if not jobs:
+        return verdicts
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="consolidator") as pool:
+        futures = {
+            pool.submit(run_consolidator, llm, issue_type, batch, config): issue_type
+            for issue_type, batch in jobs
+        }
+        for future, issue_type in futures.items():
+            verdicts[issue_type].extend(future.result())
+    logging.info(
+        f"Consolidators: {len(jobs)} calls for {len(aggregated)} dimensions "
+        f"in {time.monotonic() - started:.1f}s"
+    )
+    return verdicts
 
 
 def merge_with_consolidator(
@@ -168,12 +231,18 @@ def merge_with_consolidator(
 
 def review_chunk(llm: LLMClient, config: PipelineConfig, di_result: ExtractedDocument, text: str) -> str:
     """Run the full DAG for one text chunk and return AllCombinedIssues JSON."""
+    started = time.monotonic()
+    shots = run_all_shots(llm, text, config)
+    aggregated = {issue_type: aggregate_shots(issues) for issue_type, issues in shots.items()}
+    verdicts = run_consolidators(llm, aggregated, config)
+
     all_issues: List[CombinedIssue] = []
+    # Iterate over AGENT_PROMPTS (not the dicts above) so the output order of
+    # issues stays deterministic regardless of which calls finish first.
     for issue_type in AGENT_PROMPTS:
-        shots = run_agent_shots(llm, issue_type, text, config)
-        aggregated = aggregate_shots(shots)
-        verdicts = run_consolidator(llm, issue_type, aggregated, config)
-        all_issues.extend(merge_with_consolidator(aggregated, verdicts))
+        all_issues.extend(
+            merge_with_consolidator(aggregated[issue_type], verdicts.get(issue_type, []))
+        )
 
     # Best-effort bounding boxes: a failed highlight never aborts the review.
     for issue in all_issues:
@@ -182,20 +251,76 @@ def review_chunk(llm: LLMClient, config: PipelineConfig, di_result: ExtractedDoc
         except Exception as exc:
             logging.error(f"Unable to add bounding box to issue '{issue.text}': {exc}")
 
+    logging.info(
+        f"Chunk review finished in {time.monotonic() - started:.1f}s "
+        f"with {len(all_issues)} issues"
+    )
     return AllCombinedIssues(issues=all_issues).model_dump_json()
+
+
+def _stream_chunks_pipelined(
+    llm: LLMClient,
+    config: PipelineConfig,
+    di_result: ExtractedDocument,
+    chunks: Generator,
+    workers: int,
+) -> Generator[str, None, None]:
+    """Keep up to `workers` chunks in flight, but yield them in document order.
+
+    A long contract is many chunks; running them strictly one after another
+    multiplies the per-chunk latency by the chunk count. The look-ahead is
+    bounded so memory and provider load stay predictable; LLM_MAX_WORKERS is
+    still the hard cap on concurrent requests.
+    """
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chunk")
+    pending = deque()
+    source = iter(chunks)
+
+    def fill() -> None:
+        while len(pending) < workers:
+            try:
+                text = next(source)
+            except StopIteration:
+                return
+            pending.append(pool.submit(review_chunk, llm, config, di_result, text))
+
+    fill()
+    drained = False
+    try:
+        while pending:
+            # .result() re-raises a chunk failure at the point it is consumed,
+            # so the caller sees the same error contract as the serial path.
+            payload = pending.popleft().result()
+            fill()
+            yield payload
+        drained = True
+    finally:
+        # An abandoned review must not block on chunks nobody will consume.
+        pool.shutdown(wait=drained, cancel_futures=True)
 
 
 def stream_review(
     di_result: ExtractedDocument,
     chunks: Generator,
     config: PipelineConfig,
+    llm: LLMClient | None = None,
 ) -> Generator[str, None, None]:
     """Yield one AllCombinedIssues JSON string per text chunk (the streaming
-    contract consumed by the API's IssuesService)."""
-    llm = LLMClient(config)
-    for text_chunk in chunks:
-        yield review_chunk(llm, config, di_result, text_chunk)
+    contract consumed by the API's IssuesService).
+
+    `llm` is injectable for tests; production always builds one client per run
+    so the concurrency budget is shared across chunks."""
+    llm = llm or LLMClient(config)
+    workers = max(1, config.chunk_max_workers)
+    started = time.monotonic()
+
+    if workers == 1:
+        for text_chunk in chunks:
+            yield review_chunk(llm, config, di_result, text_chunk)
+    else:
+        yield from _stream_chunks_pipelined(llm, config, di_result, chunks, workers)
+
     logging.info(
-        f"Review finished; token usage: prompt={llm.total_prompt_tokens} "
-        f"completion={llm.total_completion_tokens}"
+        f"Review finished in {time.monotonic() - started:.1f}s; token usage: "
+        f"prompt={llm.total_prompt_tokens} completion={llm.total_completion_tokens}"
     )

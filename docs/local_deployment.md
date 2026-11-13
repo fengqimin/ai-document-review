@@ -69,8 +69,11 @@ cd app/api && uv run --project ../.. uvicorn main:app --port 8000
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | 空 | 必填；不配置时服务以 degraded 状态启动，审阅返回明确错误 |
 | `LLM_STRICT_JSON` | `true` | 优先 `json_schema` 结构化输出，端点不支持时自动降级 `json_object` |
 | `LLM_SHOTS` | `5` | 每 chunk 并发检出轮数（越高召回越好，token 消耗线性增加） |
-| `LLM_MAX_WORKERS` | `2` | 并发 LLM 请求数，注意厂商限流 |
+| `LLM_MAX_WORKERS` | `8` | 单次审阅的全局并发请求上限（所有维度、所有在跑分块共用），注意厂商限流 |
+| `CHUNK_MAX_WORKERS` | `2` | 同时在跑的分块数（有界预取，输出顺序不变） |
 | `LLM_TRANSIENT_RETRIES` / `LLM_MAX_RETRIES` | `5` / `2` | 429/5xx 退避重试 / JSON 校验重试（分开计数） |
+| `LLM_MAX_TOKENS` | `8192` | 单次输出上限；过小会把 JSON 截断（日志会提示 `finish_reason=length`） |
+| `CONSOLIDATOR_BATCH_SIZE` | `10` | 每次 consolidator 处理的 issue 数，条数越多输出越长，越容易截断 |
 | `PARAGRAPHS_PER_CHUNK` | `16` | 每个审阅块的段落数 |
 | `AUTH_DISABLED` | `false` | `true` 时免登录（仅限单机可信环境） |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 仅首次建库生效 |
@@ -108,7 +111,7 @@ RUN uv pip install --system pytesseract Pillow
 | 429 / rate limit | 调低 `LLM_MAX_WORKERS`、`LLM_SHOTS`，或确认厂商配额 |
 | JSON 解析失败频繁 | 厂商对 `json_schema` 支持差时设 `LLM_STRICT_JSON=false`（自动走 `json_object` + schema 注入） |
 | 某个维度（如 Definitive Language）一条结果都没有 | 查日志 `Agent shot failed for <维度>`：该维度的所有 shot 都没通过校验。日志里会打印具体缺失字段 |
-| 审阅很慢（3 段文档数分钟） | 单次调用耗时由厂商决定；`LLM_SHOTS=5` × 维度数即请求数。调低 `LLM_SHOTS` 或提高 `LLM_MAX_WORKERS`（注意限流） |
+| 审阅很慢（3 段文档数分钟） | 流水线已把两个维度与 5 个 shot 全部并行（受 `LLM_MAX_WORKERS` 封顶），剩余耗时基本等于厂商单次推理耗时 × 波数。调低 `LLM_SHOTS` 可线性减少请求数，或确认端点并发配额后提高 `LLM_MAX_WORKERS` |
 | 高亮缺失但 issue 正常 | 段落切分与原 Document Intelligence 存在差异属预期行为，审阅不中断 |
 | 登录后立即 401 | `JWT_SECRET` 与签发时不一致（改过未重启）；清 sessionStorage 重新登录 |
 | 容器起不来 | `docker compose logs app`；确认 8000 端口未被占用 |
